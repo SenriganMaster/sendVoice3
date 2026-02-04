@@ -40,7 +40,9 @@ internal sealed class AudioMeter
         double sum = 0;
         for (var i = 0; i < pcm.Length; i++)
         {
-            var value = Math.Abs(pcm[i]) / 32768f;
+            var sample = pcm[i];
+            var abs = sample == short.MinValue ? 32768 : Math.Abs(sample);
+            var value = abs / 32768f;
             if (value > peak)
             {
                 peak = value;

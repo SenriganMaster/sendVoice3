@@ -7,6 +7,7 @@ using Concentus.Enums;
 using Concentus.Structs;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace LanMicBridge;
 
@@ -21,6 +22,24 @@ public partial class Form1 : Form
     private const float VadThresholdDb = -45f;
     private const int VadHangoverMs = 300;
     private const float ClipThresholdLinear = 0.89f;
+    private const float AgcTargetRmsDb = -20f;
+    private const float AgcNoBoostBelowDb = -50f;
+    private const float AgcMaxBoostDb = 24f;
+    private const float AgcMaxCutDb = -18f;
+    private const float AgcAttack = 0.25f;
+    private const float AgcRelease = 0.08f;
+    private const float NoiseGateFloorDb = -60f;
+    private const float NoiseGateRangeDb = 10f;
+    private const float SendAgcTargetRmsDb = -24f;
+    private const float SendAgcNoBoostBelowDb = -55f;
+    private const float SendAgcMaxBoostDb = 12f;
+    private const float SendAgcMaxCutDb = -12f;
+    private const float SendAgcAttack = 0.12f;
+    private const float SendAgcRelease = 0.05f;
+    private const float SendNoiseGateFloorDb = -65f;
+    private const float SendNoiseGateRangeDb = 8f;
+    private const int TestToneHz = 1000;
+    private const float TestToneLevelDb = -12f;
 
     private readonly AudioMeter _meterA = new();
     private readonly AudioMeter _meterB = new();
@@ -30,6 +49,7 @@ public partial class Form1 : Form
     private MMDeviceEnumerator? _deviceEnumerator;
     private readonly List<MMDevice> _renderDevices = new();
     private readonly List<MMDevice> _captureDevices = new();
+    private readonly List<WaveInCapabilities> _mmeDevices = new();
 
     private WasapiOut? _output;
     private BufferedWaveProvider? _playBuffer;
@@ -37,8 +57,16 @@ public partial class Form1 : Form
     private CancellationTokenSource? _receiverCts;
     private Task? _receiverTask;
     private OpusDecoder? _decoder;
-    private uint _expectedSequence;
-    private bool _hasSequence;
+    private readonly object _jitterLock = new();
+    private readonly SortedDictionary<uint, PacketEntry> _jitterBuffer = new();
+    private CancellationTokenSource? _playoutCts;
+    private Task? _playoutTask;
+    private uint _playoutSequence;
+    private bool _playoutInitialized;
+    private bool _playoutBuffering = true;
+    private DateTime _playoutBufferingSince = DateTime.MinValue;
+    private int _targetJitterFrames;
+    private PacketType _lastPacketType = PacketType.Audio;
     private long _packetsReceived;
     private long _packetsLost;
     private long _bytesReceived;
@@ -57,9 +85,10 @@ public partial class Form1 : Form
     private float _outputGain = 1.0f;
     private DateTime _lastSenderMeterUpdate = DateTime.MinValue;
 
-    private WasapiCapture? _capture;
+    private IWaveIn? _capture;
     private BufferedWaveProvider? _captureBuffer;
-    private MediaFoundationResampler? _resampler;
+    private ISampleProvider? _sendSampleProvider;
+    private float[]? _sendSampleBuffer;
     private OpusEncoder? _encoder;
     private UdpClient? _senderUdp;
     private CancellationTokenSource? _senderCts;
@@ -75,6 +104,16 @@ public partial class Form1 : Form
     private int _selectedBitrate = 32000;
     private int _selectedComplexity = 5;
     private float _sendGain = 1.0f;
+    private float _recvAgcGainDb = 0f;
+    private float _sendAgcGainDb = 0f;
+    private bool _enableRecvProcessing = true;
+    private bool _enableSendProcessing = true;
+    private bool _sendTestTone;
+    private double _sendTestPhase;
+    private bool _outputStarted;
+    private int _prebufferMs;
+    private int _rebufferThresholdMs;
+    private bool _sendPcmDirect;
 
     private System.Windows.Forms.Timer _statsTimer = null!;
     private System.Windows.Forms.Timer _receiverStatusTimer = null!;
@@ -106,18 +145,23 @@ public partial class Form1 : Form
     private TrackBar _trackOutputGain = null!;
     private Label _lblOutputGainValue = null!;
     private Label _lblOutputLevel = null!;
+    private CheckBox _chkRecvProcessing = null!;
 
     private TextBox _txtIp = null!;
     private Button _btnSenderToggle = null!;
     private Label _lblSenderStatus = null!;
     private LinkLabel _linkSenderDetail = null!;
     private GroupBox _groupSenderDetail = null!;
+    private ComboBox _comboCaptureApi = null!;
     private ComboBox _comboMicDevice = null!;
     private ComboBox _comboQuality = null!;
     private TrackBar _trackGain = null!;
     private Label _lblGainValue = null!;
     private Label _lblSenderMeter = null!;
     private Label _lblSenderMeterDetail = null!;
+    private CheckBox _chkSendProcessing = null!;
+    private CheckBox _chkSendTestTone = null!;
+    private ComboBox _comboSendMode = null!;
 
     private StatusStrip _statusStrip = null!;
     private ToolStripStatusLabel _statusLabel = null!;
@@ -219,7 +263,7 @@ public partial class Form1 : Form
     }
     private Panel BuildReceiverPanel()
     {
-        var panel = new Panel { Dock = DockStyle.Fill };
+        var panel = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -241,7 +285,7 @@ public partial class Form1 : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
         panel.Controls.Add(layout);
 
         layout.Controls.Add(new Label { Text = "このPCのIP (IPv4)", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
@@ -349,30 +393,40 @@ public partial class Form1 : Form
         layout.Controls.Add(_linkReceiverDetail, 0, 11);
         layout.SetColumnSpan(_linkReceiverDetail, 2);
 
-        _groupReceiverDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Top, Visible = false, Height = 150 };
-        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4, Padding = new Padding(8) };
+        _groupReceiverDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Top, Visible = false, Height = 170 };
+        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6, Padding = new Padding(8) };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _groupReceiverDetail.Controls.Add(detailLayout);
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         detailLayout.Controls.Add(new Label { Text = "出力デバイス", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         _comboOutputDevice = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _comboOutputDevice.SelectedIndexChanged += (_, _) => ApplyOutputDeviceSelection();
         detailLayout.Controls.Add(_comboOutputDevice, 1, 0);
         detailLayout.Controls.Add(new Label { Text = "ジッタバッファ", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
         _comboJitter = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
-        _comboJitter.Items.AddRange(new object[] { "Low latency", "Stable" });
+        _comboJitter.Items.AddRange(new object[] { "Low latency", "Stable", "Ultra stable" });
         _comboJitter.SelectedIndex = 0;
         _comboJitter.SelectedIndexChanged += (_, _) => RestartOutputForJitter();
         detailLayout.Controls.Add(_comboJitter, 1, 1);
         detailLayout.Controls.Add(new Label { Text = "出力ゲイン", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
         var gainPanel = new Panel { Dock = DockStyle.Fill };
-        _trackOutputGain = new TrackBar { Minimum = 25, Maximum = 400, Value = 100, TickFrequency = 25, Dock = DockStyle.Fill };
+        _trackOutputGain = new TrackBar { Minimum = 25, Maximum = 1000, Value = 100, TickFrequency = 25, Dock = DockStyle.Fill };
         _trackOutputGain.Scroll += (_, _) => UpdateOutputGain();
         _lblOutputGainValue = new Label { Text = "100%", AutoSize = true, Dock = DockStyle.Right };
         gainPanel.Controls.Add(_trackOutputGain);
         gainPanel.Controls.Add(_lblOutputGainValue);
         detailLayout.Controls.Add(gainPanel, 1, 2);
         UpdateOutputGain();
+        detailLayout.Controls.Add(new Label { Text = "音声処理", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
+        _chkRecvProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
+        _chkRecvProcessing.CheckedChanged += (_, _) => _enableRecvProcessing = _chkRecvProcessing.Checked;
+        detailLayout.Controls.Add(_chkRecvProcessing, 1, 3);
 
         layout.Controls.Add(_groupReceiverDetail, 0, 12);
         layout.SetColumnSpan(_groupReceiverDetail, 2);
@@ -396,7 +450,7 @@ public partial class Form1 : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 300));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(layout);
@@ -420,33 +474,70 @@ public partial class Form1 : Form
         layout.Controls.Add(_linkSenderDetail, 0, 3);
         layout.SetColumnSpan(_linkSenderDetail, 2);
 
-        _groupSenderDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Top, Visible = false, Height = 170 };
-        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4, Padding = new Padding(8) };
+        _groupSenderDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Fill, Visible = false, Height = 300 };
+        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 8, Padding = new Padding(8) };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _groupSenderDetail.Controls.Add(detailLayout);
-        detailLayout.Controls.Add(new Label { Text = "マイクデバイス", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        detailLayout.Controls.Add(new Label { Text = "入力方式", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        _comboCaptureApi = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+        _comboCaptureApi.Items.AddRange(new object[] { "WASAPI", "MME (互換)" });
+        _comboCaptureApi.SelectedIndex = 0;
+        _comboCaptureApi.SelectedIndexChanged += (_, _) =>
+        {
+            StopSender();
+            RefreshCaptureDeviceList();
+        };
+        detailLayout.Controls.Add(_comboCaptureApi, 1, 0);
+        detailLayout.Controls.Add(new Label { Text = "マイクデバイス", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
         _comboMicDevice = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
-        detailLayout.Controls.Add(_comboMicDevice, 1, 0);
-        detailLayout.Controls.Add(new Label { Text = "送信品質", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
+        detailLayout.Controls.Add(_comboMicDevice, 1, 1);
+        detailLayout.Controls.Add(new Label { Text = "送信品質", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
         _comboQuality = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
-        _comboQuality.Items.AddRange(new object[] { "低", "標準", "高" });
-        _comboQuality.SelectedIndex = 1;
+        _comboQuality.Items.AddRange(new object[] { "低", "標準", "高", "超高" });
+        _comboQuality.SelectedIndex = 2;
         _comboQuality.SelectedIndexChanged += (_, _) => ApplyQualitySelection();
-        detailLayout.Controls.Add(_comboQuality, 1, 1);
-        detailLayout.Controls.Add(new Label { Text = "送信ゲイン", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
+        _comboQuality.Enabled = true;
+        detailLayout.Controls.Add(_comboQuality, 1, 2);
+        detailLayout.Controls.Add(new Label { Text = "送信方式", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
+        _comboSendMode = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+        _comboSendMode.Items.AddRange(new object[] { "Opus (推奨)", "PCM直送(テスト)" });
+        _comboSendMode.SelectedIndex = 0;
+        _comboSendMode.SelectedIndexChanged += (_, _) =>
+        {
+            _sendPcmDirect = _comboSendMode.SelectedIndex == 1;
+            _comboQuality.Enabled = !_sendPcmDirect;
+        };
+        _sendPcmDirect = _comboSendMode.SelectedIndex == 1;
+        detailLayout.Controls.Add(_comboSendMode, 1, 3);
+        detailLayout.Controls.Add(new Label { Text = "送信ゲイン", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
         var gainPanel = new Panel { Dock = DockStyle.Fill };
-        _trackGain = new TrackBar { Minimum = 25, Maximum = 200, Value = 100, TickFrequency = 25, Dock = DockStyle.Fill };
+        _trackGain = new TrackBar { Minimum = 25, Maximum = 400, Value = 100, TickFrequency = 25, Dock = DockStyle.Fill };
         _trackGain.Scroll += (_, _) => UpdateGain();
         _lblGainValue = new Label { Text = "100%", AutoSize = true, Dock = DockStyle.Right };
         gainPanel.Controls.Add(_trackGain);
         gainPanel.Controls.Add(_lblGainValue);
-        detailLayout.Controls.Add(gainPanel, 1, 2);
+        detailLayout.Controls.Add(gainPanel, 1, 4);
         UpdateGain();
-        detailLayout.Controls.Add(new Label { Text = "送信入力レベル", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
-        detailLayout.Controls.Add(new Label { Text = "送信入力レベル", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
+        detailLayout.Controls.Add(new Label { Text = "音声処理", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 5);
+        _chkSendProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
+        _chkSendProcessing.CheckedChanged += (_, _) => _enableSendProcessing = _chkSendProcessing.Checked;
+        detailLayout.Controls.Add(_chkSendProcessing, 1, 5);
+        detailLayout.Controls.Add(new Label { Text = "送信テスト音", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
+        _chkSendTestTone = new CheckBox { Text = "1kHzサイン送出", Dock = DockStyle.Fill, Checked = false };
+        _chkSendTestTone.CheckedChanged += (_, _) => _sendTestTone = _chkSendTestTone.Checked;
+        detailLayout.Controls.Add(_chkSendTestTone, 1, 6);
+        detailLayout.Controls.Add(new Label { Text = "送信入力レベル", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 7);
         _lblSenderMeterDetail = new Label { Text = "Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
-        detailLayout.Controls.Add(_lblSenderMeterDetail, 1, 3);
+        detailLayout.Controls.Add(_lblSenderMeterDetail, 1, 7);
 
         layout.Controls.Add(_groupSenderDetail, 0, 4);
         layout.SetColumnSpan(_groupSenderDetail, 2);
@@ -560,7 +651,6 @@ public partial class Form1 : Form
         _renderDevices.Clear();
         _captureDevices.Clear();
         _comboOutputDevice.Items.Clear();
-        _comboMicDevice.Items.Clear();
 
         foreach (var device in _deviceEnumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
         {
@@ -571,7 +661,6 @@ public partial class Form1 : Form
         foreach (var device in _deviceEnumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
         {
             _captureDevices.Add(device);
-            _comboMicDevice.Items.Add(device.FriendlyName);
         }
 
         var recommendedOutput = FindCableInputIndex();
@@ -580,12 +669,42 @@ public partial class Form1 : Form
             _comboOutputDevice.SelectedIndex = recommendedOutput >= 0 ? recommendedOutput : 0;
         }
 
-        if (_captureDevices.Count > 0)
+        RefreshCaptureDeviceList();
+
+        UpdateCableStatus();
+    }
+
+    private void RefreshCaptureDeviceList()
+    {
+        if (_comboMicDevice == null)
+        {
+            return;
+        }
+
+        _comboMicDevice.Items.Clear();
+        _mmeDevices.Clear();
+
+        if (_comboCaptureApi.SelectedIndex == 1)
+        {
+            for (var i = 0; i < WaveInEvent.DeviceCount; i++)
+            {
+                var caps = WaveInEvent.GetCapabilities(i);
+                _mmeDevices.Add(caps);
+                _comboMicDevice.Items.Add(caps.ProductName);
+            }
+        }
+        else
+        {
+            foreach (var device in _captureDevices)
+            {
+                _comboMicDevice.Items.Add(device.FriendlyName);
+            }
+        }
+
+        if (_comboMicDevice.Items.Count > 0)
         {
             _comboMicDevice.SelectedIndex = 0;
         }
-
-        UpdateCableStatus();
     }
 
     private int FindCableInputIndex()
@@ -661,13 +780,17 @@ public partial class Form1 : Form
         {
             _decoder = OpusDecoder.Create(SampleRate, Channels);
             _receiverUdp = new UdpClient(DefaultPort);
+            _receiverUdp.Client.ReceiveBufferSize = 1024 * 1024;
             _receiverCts = new CancellationTokenSource();
             _receiverTask = Task.Run(() => ReceiveLoop(_receiverCts.Token));
+            _playoutCts = new CancellationTokenSource();
+            _playoutTask = Task.Run(() => PlayoutLoop(_playoutCts.Token));
             _statsWatch.Restart();
             _receiverClock.Restart();
             _statsTimer.Start();
             _receiverStatusTimer.Start();
             _silenceTimer.Start();
+            ResetPlayoutState();
             RestartReceiverOutput();
             SetStatus("待受中");
             AppLogger.Log("受信待受開始");
@@ -694,17 +817,36 @@ public partial class Form1 : Form
                 return;
             }
 
-            var latency = _comboJitter.SelectedIndex == 1 ? 150 : 50;
+            var latency = _comboJitter.SelectedIndex switch
+            {
+                1 => 140,
+                2 => 220,
+                _ => 60
+            };
+            var bufferSeconds = _comboJitter.SelectedIndex switch
+            {
+                1 => 3.5,
+                2 => 4.5,
+                _ => 1.8
+            };
             var device = _renderDevices[_comboOutputDevice.SelectedIndex];
             _output = new WasapiOut(device, AudioClientShareMode.Shared, true, latency);
             _playBuffer = new BufferedWaveProvider(new WaveFormat(SampleRate, 16, Channels))
             {
                 DiscardOnBufferOverflow = true,
-                BufferDuration = TimeSpan.FromSeconds(2)
+                BufferDuration = TimeSpan.FromSeconds(bufferSeconds)
             };
             _output.Init(_playBuffer);
-            _output.Play();
-            AppLogger.Log($"出力初期化 Device={device.FriendlyName} Latency={latency}ms");
+            _outputStarted = false;
+            _prebufferMs = _comboJitter.SelectedIndex switch
+            {
+                1 => 180,
+                2 => 280,
+                _ => 80
+            };
+            _targetJitterFrames = Math.Max(3, _prebufferMs / FrameMs);
+            _rebufferThresholdMs = Math.Max(40, _prebufferMs / 2);
+            AppLogger.Log($"出力初期化 Device={device.FriendlyName} Latency={latency}ms Prebuffer={_prebufferMs}ms");
         }
         catch (Exception ex)
         {
@@ -716,10 +858,15 @@ public partial class Form1 : Form
     private void StopReceiver()
     {
         _receiverCts?.Cancel();
-        _receiverTask?.Wait(500);
+        WaitTaskSafely(_receiverTask, 500);
         _receiverTask = null;
         _receiverCts?.Dispose();
         _receiverCts = null;
+        _playoutCts?.Cancel();
+        WaitTaskSafely(_playoutTask, 500);
+        _playoutTask = null;
+        _playoutCts?.Dispose();
+        _playoutCts = null;
 
         _receiverUdp?.Close();
         _receiverUdp?.Dispose();
@@ -729,6 +876,7 @@ public partial class Form1 : Form
         _output?.Dispose();
         _output = null;
         _playBuffer = null;
+        _outputStarted = false;
 
         _statsTimer?.Stop();
         _receiverStatusTimer?.Stop();
@@ -736,7 +884,7 @@ public partial class Form1 : Form
         _packetsReceived = 0;
         _packetsLost = 0;
         _bytesReceived = 0;
-        _hasSequence = false;
+        ResetPlayoutState();
     }
 
     private async Task ReceiveLoop(CancellationToken token)
@@ -784,6 +932,9 @@ public partial class Form1 : Form
             case PacketType.Audio:
                 HandleAudioPacket(seq, payload);
                 break;
+            case PacketType.Pcm:
+                HandlePcmPacket(seq, payload);
+                break;
         }
     }
 
@@ -800,35 +951,217 @@ public partial class Form1 : Form
 
     private void HandleAudioPacket(uint sequence, ReadOnlySpan<byte> payload)
     {
+        EnqueuePacket(sequence, PacketType.Audio, payload);
+    }
+
+    private void HandlePcmPacket(uint sequence, ReadOnlySpan<byte> payload)
+    {
+        EnqueuePacket(sequence, PacketType.Pcm, payload);
+    }
+
+    private void EnqueuePacket(uint sequence, PacketType type, ReadOnlySpan<byte> payload)
+    {
         _packetsReceived++;
         _bytesReceived += payload.Length;
         UpdateJitter(sequence);
 
-        if (!_hasSequence)
+        var data = payload.ToArray();
+        lock (_jitterLock)
         {
-            _expectedSequence = sequence;
-            _hasSequence = true;
+            if (!_jitterBuffer.ContainsKey(sequence))
+            {
+                _jitterBuffer[sequence] = new PacketEntry(type, data);
+            }
+
+            _lastPacketType = type;
+            if (!_playoutInitialized)
+            {
+                _playoutSequence = sequence;
+                _playoutInitialized = true;
+                _playoutBuffering = true;
+                _playoutBufferingSince = DateTime.UtcNow;
+            }
+        }
+    }
+
+    private async Task PlayoutLoop(CancellationToken token)
+    {
+        var frameDuration = TimeSpan.FromMilliseconds(FrameMs);
+        var stopwatch = Stopwatch.StartNew();
+        var next = stopwatch.Elapsed;
+
+        while (!token.IsCancellationRequested)
+        {
+            if (!_playoutInitialized)
+            {
+                await Task.Delay(5, token);
+                continue;
+            }
+
+            if (_lastPacketTime != DateTime.MinValue && (DateTime.UtcNow - _lastPacketTime).TotalSeconds > 2)
+            {
+                ResetPlayoutState();
+                await Task.Delay(50, token);
+                continue;
+            }
+
+            if (_playoutBuffering)
+            {
+                var bufferedCount = GetBufferedCount();
+                var bufferedEnough = bufferedCount >= _targetJitterFrames;
+                var bufferedTooLong = bufferedCount > 0 && _playoutBufferingSince != DateTime.MinValue &&
+                    (DateTime.UtcNow - _playoutBufferingSince).TotalSeconds >= 0.5;
+                if (bufferedEnough || bufferedTooLong)
+                {
+                    _playoutBuffering = false;
+                    next = stopwatch.Elapsed;
+                    AppLogger.Log($"再生開始 JitterFrames={_targetJitterFrames} Buffered={bufferedCount}");
+                }
+                else
+                {
+                    await Task.Delay(5, token);
+                    continue;
+                }
+            }
+            else
+            {
+                var bufferedCount = GetBufferedCount();
+                if (bufferedCount > _targetJitterFrames * 3 && TryGetMinSequence(out var minSeq))
+                {
+                    _playoutSequence = minSeq;
+                    AppLogger.Log($"再同期 PlayoutSeq={_playoutSequence} Buffered={bufferedCount}");
+                }
+            }
+
+            PlaySequence(_playoutSequence);
+            _playoutSequence++;
+
+            next += frameDuration;
+            var delay = next - stopwatch.Elapsed;
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, token);
+            }
+        }
+    }
+
+    private void PlaySequence(uint sequence)
+    {
+        if (TryDequeuePacket(sequence, out var entry) && entry != null)
+        {
+            if (entry.Type == PacketType.Audio)
+            {
+                DecodeAndPlay(entry.Payload, entry.Payload.Length, false, false);
+            }
+            else
+            {
+                ProcessPcmPayload(entry.Payload);
+            }
+
+            return;
         }
 
-        if (sequence != _expectedSequence)
+        _packetsLost++;
+
+        if (TryPeekPacket(sequence + 1, out var next) && next != null && next.Type == PacketType.Audio)
         {
-            var missing = sequence > _expectedSequence ? (int)(sequence - _expectedSequence) : 0;
-            if (missing > 0)
+            DecodeAndPlay(next.Payload, next.Payload.Length, false, true);
+            return;
+        }
+
+        if (_lastPacketType == PacketType.Pcm)
+        {
+            ProcessPcmAndPlay(new short[FrameSamples]);
+        }
+        else
+        {
+            DecodeAndPlay(Array.Empty<byte>(), 0, true, false);
+        }
+    }
+
+    private void ProcessPcmPayload(byte[] payload)
+    {
+        var pcm = new short[FrameSamples];
+        var frameBytes = FrameSamples * 2;
+        if (payload.Length >= frameBytes)
+        {
+            Buffer.BlockCopy(payload, 0, pcm, 0, frameBytes);
+        }
+        else if (payload.Length > 0)
+        {
+            Buffer.BlockCopy(payload, 0, pcm, 0, payload.Length);
+        }
+
+        ProcessPcmAndPlay(pcm);
+    }
+
+    private bool TryDequeuePacket(uint sequence, out PacketEntry? entry)
+    {
+        lock (_jitterLock)
+        {
+            if (_jitterBuffer.TryGetValue(sequence, out entry))
             {
-                _packetsLost += missing;
-                for (var i = 0; i < missing; i++)
-                {
-                    DecodeAndPlay(Array.Empty<byte>(), 0, true);
-                }
+                _jitterBuffer.Remove(sequence);
+                return true;
             }
         }
 
-        _expectedSequence = sequence + 1;
-        var data = payload.ToArray();
-        DecodeAndPlay(data, data.Length, false);
+        entry = null;
+        return false;
     }
 
-    private void DecodeAndPlay(byte[] payload, int length, bool lost)
+    private bool TryPeekPacket(uint sequence, out PacketEntry? entry)
+    {
+        lock (_jitterLock)
+        {
+            if (_jitterBuffer.TryGetValue(sequence, out entry))
+            {
+                return true;
+            }
+        }
+
+        entry = null;
+        return false;
+    }
+
+    private int GetBufferedCount()
+    {
+        lock (_jitterLock)
+        {
+            return _jitterBuffer.Count;
+        }
+    }
+
+    private bool TryGetMinSequence(out uint sequence)
+    {
+        lock (_jitterLock)
+        {
+            foreach (var key in _jitterBuffer.Keys)
+            {
+                sequence = key;
+                return true;
+            }
+        }
+
+        sequence = 0;
+        return false;
+    }
+
+    private void ResetPlayoutState()
+    {
+        lock (_jitterLock)
+        {
+            _jitterBuffer.Clear();
+        }
+
+        _playoutInitialized = false;
+        _playoutBuffering = true;
+        _playoutSequence = 0;
+        _lastPacketType = PacketType.Audio;
+        _playoutBufferingSince = DateTime.MinValue;
+    }
+
+    private void DecodeAndPlay(byte[] payload, int length, bool lost, bool useFec)
     {
         if (_decoder == null || _playBuffer == null)
         {
@@ -843,11 +1176,28 @@ public partial class Form1 : Form
         var pcm = new short[FrameSamples];
         try
         {
-            _decoder.Decode(payload, 0, length, pcm, 0, FrameSamples, lost);
+            if (lost)
+            {
+                _decoder.Decode(Array.Empty<byte>(), 0, 0, pcm, 0, FrameSamples, false);
+            }
+            else
+            {
+                _decoder.Decode(payload, 0, length, pcm, 0, FrameSamples, useFec);
+            }
         }
         catch
         {
             Array.Clear(pcm, 0, pcm.Length);
+        }
+
+        ProcessPcmAndPlay(pcm);
+    }
+
+    private void ProcessPcmAndPlay(short[] pcm)
+    {
+        if (_playBuffer == null)
+        {
+            return;
         }
 
         AudioMeter.ComputePeakRms(pcm, out var peak, out var rms);
@@ -855,13 +1205,38 @@ public partial class Form1 : Form
         UpdateMeterUi(_meterA, _progressMeterA, _lblMeterA);
         UpdateMeterWarnings(peak, _meterA.SmoothedRmsDb);
 
-        ApplyGain(pcm, _outputGain);
-        AudioMeter.ComputePeakRms(pcm, out var outPeak, out var outRms);
+        var rmsDbPre = LinearToDb(rms);
+        float outPeak;
+        float outRms;
+        if (_enableRecvProcessing)
+        {
+            ApplyAgcAndGain(
+                pcm,
+                rmsDbPre,
+                ref _recvAgcGainDb,
+                _outputGain,
+                out outPeak,
+                out outRms,
+                AgcTargetRmsDb,
+                AgcNoBoostBelowDb,
+                AgcMaxBoostDb,
+                AgcMaxCutDb,
+                AgcAttack,
+                AgcRelease,
+                NoiseGateFloorDb,
+                NoiseGateRangeDb);
+        }
+        else
+        {
+            ApplyGain(pcm, _outputGain);
+            AudioMeter.ComputePeakRms(pcm, out outPeak, out outRms);
+        }
         UpdateOutputLevel(outPeak, outRms);
 
         var bytes = new byte[pcm.Length * 2];
         Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
         _playBuffer.AddSamples(bytes, 0, bytes.Length);
+        MaybeStartOutput();
     }
 
     private void UpdateJitter(uint sequence)
@@ -923,15 +1298,39 @@ public partial class Form1 : Form
 
     private void EnsureSilence()
     {
-        if (_playBuffer == null)
+        if (_playBuffer == null || _output == null)
         {
             return;
         }
 
-        if (_playBuffer.BufferedDuration.TotalMilliseconds < 40)
+        var bufferedMs = _playBuffer.BufferedDuration.TotalMilliseconds;
+        if (_outputStarted && bufferedMs < _rebufferThresholdMs)
+        {
+            _output.Pause();
+            _outputStarted = false;
+            AppLogger.Log("出力再バッファ開始");
+            return;
+        }
+
+        if (_outputStarted && bufferedMs < 40)
         {
             var bytes = new byte[FrameSamples * 2];
             _playBuffer.AddSamples(bytes, 0, bytes.Length);
+        }
+    }
+
+    private void MaybeStartOutput()
+    {
+        if (_output == null || _playBuffer == null || _outputStarted)
+        {
+            return;
+        }
+
+        if (_playBuffer.BufferedDuration.TotalMilliseconds >= _prebufferMs)
+        {
+            _output.Play();
+            _outputStarted = true;
+            AppLogger.Log($"出力開始 Prebuffer={_prebufferMs}ms");
         }
     }
     private async void BtnCheckTone_Click(object? sender, EventArgs e)
@@ -1108,6 +1507,18 @@ public partial class Form1 : Form
         }
     }
 
+    private sealed class PacketEntry
+    {
+        public PacketType Type { get; }
+        public byte[] Payload { get; }
+
+        public PacketEntry(PacketType type, byte[] payload)
+        {
+            Type = type;
+            Payload = payload;
+        }
+    }
+
     private void UpdateMeterWarnings(float peak, float rmsDb)
     {
         var warnings = new List<string>();
@@ -1168,6 +1579,10 @@ public partial class Form1 : Form
             case 2:
                 _selectedBitrate = 64000;
                 _selectedComplexity = 8;
+                break;
+            case 3:
+                _selectedBitrate = 128000;
+                _selectedComplexity = 10;
                 break;
             default:
                 _selectedBitrate = 32000;
@@ -1230,6 +1645,100 @@ public partial class Form1 : Form
             pcm[i] = (short)value;
         }
     }
+
+    private static void ApplyAgcAndGain(
+        short[] pcm,
+        float rmsDbPre,
+        ref float agcGainDb,
+        float userGain,
+        out float outPeak,
+        out float outRms,
+        float targetRmsDb,
+        float noBoostBelowDb,
+        float maxBoostDb,
+        float maxCutDb,
+        float attack,
+        float release,
+        float gateFloorDb,
+        float gateRangeDb)
+    {
+        float targetGainDb;
+        if (rmsDbPre < noBoostBelowDb)
+        {
+            targetGainDb = 0f;
+        }
+        else
+        {
+            targetGainDb = Math.Clamp(targetRmsDb - rmsDbPre, maxCutDb, maxBoostDb);
+        }
+
+        var lerp = targetGainDb > agcGainDb ? attack : release;
+        agcGainDb = Lerp(agcGainDb, targetGainDb, lerp);
+
+        var gate = Math.Clamp((rmsDbPre - gateFloorDb) / gateRangeDb, 0f, 1f);
+        var gainLinear = DbToLinear(agcGainDb) * userGain * gate;
+        ApplyGainWithSoftClip(pcm, gainLinear);
+
+        AudioMeter.ComputePeakRms(pcm, out outPeak, out outRms);
+    }
+
+    private static void ApplyGainWithSoftClip(short[] pcm, float gain)
+    {
+        if (Math.Abs(gain - 1f) < 0.001f)
+        {
+            return;
+        }
+
+        for (var i = 0; i < pcm.Length; i++)
+        {
+            var x = (pcm[i] / 32768f) * gain;
+            var y = (float)Math.Tanh(x);
+            var value = (int)Math.Round(y * short.MaxValue);
+            if (value > short.MaxValue)
+            {
+                value = short.MaxValue;
+            }
+            else if (value < short.MinValue)
+            {
+                value = short.MinValue;
+            }
+
+            pcm[i] = (short)value;
+        }
+    }
+
+    private static float DbToLinear(float db)
+    {
+        return (float)Math.Pow(10.0, db / 20.0);
+    }
+
+    private static float LinearToDb(float linear)
+    {
+        return 20f * (float)Math.Log10(linear + 1e-9f);
+    }
+
+    private static float Lerp(float a, float b, float t)
+    {
+        return a + (b - a) * t;
+    }
+
+    private void FillTestToneFrame(short[] pcm)
+    {
+        var amplitude = (float)Math.Pow(10, TestToneLevelDb / 20.0);
+        var phaseStep = 2.0 * Math.PI * TestToneHz / SampleRate;
+
+        for (var i = 0; i < pcm.Length; i++)
+        {
+            var value = Math.Sin(_sendTestPhase) * amplitude;
+            _sendTestPhase += phaseStep;
+            if (_sendTestPhase >= Math.PI * 2)
+            {
+                _sendTestPhase -= Math.PI * 2;
+            }
+
+            pcm[i] = (short)Math.Round(Math.Clamp(value, -1.0, 1.0) * short.MaxValue);
+        }
+    }
     private void StartSender()
     {
         if (!IPAddress.TryParse(_txtIp.Text.Trim(), out var ipAddress))
@@ -1238,28 +1747,72 @@ public partial class Form1 : Form
             return;
         }
 
-        if (_comboMicDevice.SelectedIndex < 0 || _comboMicDevice.SelectedIndex >= _captureDevices.Count)
-        {
-            MessageBox.Show("マイクデバイスを選択してください。", "LanMicBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
         try
         {
-            var device = _captureDevices[_comboMicDevice.SelectedIndex];
-            _capture = new WasapiCapture(device, true, FrameMs);
+            var useMme = _comboCaptureApi.SelectedIndex == 1;
+            if (useMme)
+            {
+                var mmeIndex = _comboMicDevice.SelectedIndex;
+                if (mmeIndex < 0 || mmeIndex >= WaveInEvent.DeviceCount)
+                {
+                    MessageBox.Show("マイクデバイスを選択してください。", "LanMicBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var waveIn = new WaveInEvent
+                {
+                    DeviceNumber = mmeIndex,
+                    BufferMilliseconds = 50,
+                    NumberOfBuffers = 3
+                };
+                _capture = waveIn;
+            }
+            else
+            {
+                if (_comboMicDevice.SelectedIndex < 0 || _comboMicDevice.SelectedIndex >= _captureDevices.Count)
+                {
+                    MessageBox.Show("マイクデバイスを選択してください。", "LanMicBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var device = _captureDevices[_comboMicDevice.SelectedIndex];
+                _capture = new WasapiCapture(device, true, 50);
+            }
+
             _captureBuffer = new BufferedWaveProvider(_capture.WaveFormat)
             {
-                DiscardOnBufferOverflow = true
+                DiscardOnBufferOverflow = true,
+                ReadFully = true,
+                BufferDuration = TimeSpan.FromSeconds(1)
             };
             _capture.DataAvailable += CaptureOnDataAvailable;
             _capture.RecordingStopped += CaptureOnRecordingStopped;
 
-            var targetFormat = new WaveFormat(SampleRate, 16, Channels);
-            _resampler = new MediaFoundationResampler(_captureBuffer, targetFormat)
+            var sampleProvider = _captureBuffer.ToSampleProvider();
+            var inputChannels = sampleProvider.WaveFormat.Channels;
+            if (inputChannels == 2)
             {
-                ResamplerQuality = 30
-            };
+                sampleProvider = new StereoToMonoSampleProvider(sampleProvider)
+                {
+                    LeftVolume = 0.5f,
+                    RightVolume = 0.5f
+                };
+            }
+            else if (inputChannels != 1)
+            {
+                var mux = new MultiplexingSampleProvider(new[] { sampleProvider }, 1);
+                mux.ConnectInputToOutput(0, 0);
+                sampleProvider = mux;
+                AppLogger.Log($"送信入力チャンネル数 {inputChannels} -> 1 に変換");
+            }
+
+            if (sampleProvider.WaveFormat.SampleRate != SampleRate)
+            {
+                sampleProvider = new WdlResamplingSampleProvider(sampleProvider, SampleRate);
+            }
+
+            _sendSampleProvider = sampleProvider;
+            _sendSampleBuffer = new float[FrameSamples];
 
             _encoder = OpusEncoder.Create(SampleRate, Channels, OpusApplication.OPUS_APPLICATION_VOIP);
             _encoder.Bitrate = _selectedBitrate;
@@ -1267,9 +1820,10 @@ public partial class Form1 : Form
             _encoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE;
             _encoder.UseVBR = true;
             _encoder.UseInbandFEC = true;
-            _encoder.PacketLossPercent = 10;
+            _encoder.PacketLossPercent = 20;
 
             _senderUdp = new UdpClient(0);
+            _senderUdp.Client.SendBufferSize = 1024 * 1024;
             _senderUdp.Connect(ipAddress, DefaultPort);
             _senderCts = new CancellationTokenSource();
             _senderTask = Task.Run(() => SendLoop(_senderCts.Token));
@@ -1291,8 +1845,8 @@ public partial class Form1 : Form
     private void StopSender()
     {
         _senderCts?.Cancel();
-        _senderTask?.Wait(500);
-        _senderReceiveTask?.Wait(500);
+        WaitTaskSafely(_senderTask, 500);
+        WaitTaskSafely(_senderReceiveTask, 500);
         _senderTask = null;
         _senderReceiveTask = null;
         _senderCts?.Dispose();
@@ -1307,8 +1861,8 @@ public partial class Form1 : Form
             _capture = null;
         }
 
-        _resampler?.Dispose();
-        _resampler = null;
+        _sendSampleProvider = null;
+        _sendSampleBuffer = null;
         _captureBuffer = null;
         _encoder = null;
 
@@ -1338,62 +1892,122 @@ public partial class Form1 : Form
 
     private async Task SendLoop(CancellationToken token)
     {
-        var frameBytes = FrameSamples * 2;
-        var buffer = new byte[frameBytes];
         var pcm = new short[FrameSamples];
         var payload = new byte[4000];
+        var pcmBytes = new byte[FrameSamples * 2];
 
         while (!token.IsCancellationRequested)
         {
             try
             {
-                if (_resampler == null || _encoder == null || _senderUdp == null)
+                var senderUdp = _senderUdp;
+                if (_sendSampleProvider == null || _sendSampleBuffer == null || senderUdp == null)
+                {
+                    await Task.Delay(20, token);
+                    continue;
+                }
+                var encoder = _encoder;
+                if (!_sendPcmDirect && encoder == null)
                 {
                     await Task.Delay(20, token);
                     continue;
                 }
 
-                var read = _resampler.Read(buffer, 0, buffer.Length);
-                if (read == 0)
+                if (_sendTestTone)
                 {
-                    await Task.Delay(5, token);
-                    continue;
+                    FillTestToneFrame(pcm);
                 }
+                else
+                {
+                    var samplesRead = _sendSampleProvider.Read(_sendSampleBuffer, 0, FrameSamples);
+                    if (samplesRead == 0)
+                    {
+                        Array.Clear(pcm, 0, pcm.Length);
+                    }
+                    else
+                    {
+                        if (samplesRead < FrameSamples)
+                        {
+                            Array.Clear(_sendSampleBuffer, samplesRead, FrameSamples - samplesRead);
+                        }
 
-                Buffer.BlockCopy(buffer, 0, pcm, 0, frameBytes);
+                        for (var i = 0; i < FrameSamples; i++)
+                        {
+                            var sample = Math.Clamp(_sendSampleBuffer[i], -1f, 1f);
+                            pcm[i] = (short)Math.Round(sample * short.MaxValue);
+                        }
+                    }
+                }
                 ApplyGain(pcm, _sendGain);
-                AudioMeter.ComputePeakRms(pcm, out var peak, out var rms);
-                var rmsDb = 20f * (float)Math.Log10(rms + 1e-9f);
+                AudioMeter.ComputePeakRms(pcm, out var peakPre, out var rmsPre);
+                var rmsDbPre = LinearToDb(rmsPre);
                 var now = DateTime.UtcNow;
 
-                if ((now - _lastSenderMeterUpdate).TotalMilliseconds >= 200)
-                {
-                    var peakDb = 20f * (float)Math.Log10(peak + 1e-9f);
-                    var senderText = $"Peak {peakDb:0.0} dBFS / RMS {rmsDb:0.0} dBFS";
-                    UpdateSenderMeterText(senderText);
-
-                    _lastSenderMeterUpdate = now;
-                }
-
-                if (rmsDb >= VadThresholdDb)
+                if (rmsDbPre >= VadThresholdDb || _sendTestTone)
                 {
                     _lastVoiceTime = now;
                 }
 
                 var withinHangover = (now - _lastVoiceTime).TotalMilliseconds <= VadHangoverMs;
-                if (rmsDb >= VadThresholdDb || withinHangover)
+                float peak;
+                float rms;
+                if (_enableSendProcessing)
                 {
-                    var encoded = _encoder.Encode(pcm, 0, FrameSamples, payload, 0, payload.Length);
-                    var packet = NetworkProtocol.BuildAudio(_senderId, _sendSequence++, payload.AsSpan(0, encoded));
-                    _senderUdp.Send(packet, packet.Length);
-                    SetSenderStatus(_accepted ? "接続中" : "再接続中");
+                    ApplyAgcAndGain(
+                        pcm,
+                        rmsDbPre,
+                        ref _sendAgcGainDb,
+                        _sendGain,
+                        out peak,
+                        out rms,
+                        SendAgcTargetRmsDb,
+                        SendAgcNoBoostBelowDb,
+                        SendAgcMaxBoostDb,
+                        SendAgcMaxCutDb,
+                        SendAgcAttack,
+                        SendAgcRelease,
+                        SendNoiseGateFloorDb,
+                        SendNoiseGateRangeDb);
                 }
                 else
+                {
+                    ApplyGain(pcm, _sendGain);
+                    AudioMeter.ComputePeakRms(pcm, out peak, out rms);
+                }
+                var rmsDbPost = LinearToDb(rms);
+
+                if ((now - _lastSenderMeterUpdate).TotalMilliseconds >= 200)
+                {
+                    var peakDb = LinearToDb(peak);
+                    var senderText = $"Peak {peakDb:0.0} dBFS / RMS {rmsDbPost:0.0} dBFS";
+                    UpdateSenderMeterText(senderText);
+
+                    _lastSenderMeterUpdate = now;
+                }
+
+                var sentAudio = false;
+                if (_sendPcmDirect)
+                {
+                    Buffer.BlockCopy(pcm, 0, pcmBytes, 0, pcmBytes.Length);
+                    var pcmPacket = NetworkProtocol.BuildPcm(_senderId, _sendSequence++, pcmBytes);
+                    senderUdp.Send(pcmPacket, pcmPacket.Length);
+                    sentAudio = true;
+                    SetSenderStatus(_accepted ? "接続中" : "再接続中");
+                }
+                else if (rmsDbPre >= VadThresholdDb || withinHangover || _sendTestTone)
+                {
+                    var encoded = encoder!.Encode(pcm, 0, FrameSamples, payload, 0, payload.Length);
+                    var packet = NetworkProtocol.BuildAudio(_senderId, _sendSequence++, payload.AsSpan(0, encoded));
+                    senderUdp.Send(packet, packet.Length);
+                    sentAudio = true;
+                    SetSenderStatus(_accepted ? "接続中" : "再接続中");
+                }
+                else if (!sentAudio)
                 {
                     if ((now - _lastKeepAlive).TotalMilliseconds >= KeepAliveMs)
                     {
                         var keep = NetworkProtocol.BuildKeepAlive(_senderId);
-                        _senderUdp.Send(keep, keep.Length);
+                        senderUdp.Send(keep, keep.Length);
                         _lastKeepAlive = now;
                     }
                 }
@@ -1401,7 +2015,7 @@ public partial class Form1 : Form
                 if ((now - _lastHello).TotalMilliseconds >= 2000 && !_accepted)
                 {
                     var hello = NetworkProtocol.BuildHello(_senderId);
-                    _senderUdp.Send(hello, hello.Length);
+                    senderUdp.Send(hello, hello.Length);
                     _lastHello = now;
                 }
             }
@@ -1415,6 +2029,8 @@ public partial class Form1 : Form
                 SetSenderStatus("エラー");
                 await Task.Delay(200, token);
             }
+
+            await Task.Delay(FrameMs, token);
         }
     }
 
@@ -1521,6 +2137,26 @@ public partial class Form1 : Form
         else
         {
             _statusLabel.Text = text;
+        }
+    }
+
+    private static void WaitTaskSafely(Task? task, int millisecondsTimeout)
+    {
+        if (task == null)
+        {
+            return;
+        }
+
+        try
+        {
+            task.Wait(millisecondsTimeout);
+        }
+        catch (AggregateException ex)
+        {
+            ex.Handle(inner => inner is TaskCanceledException);
+        }
+        catch (TaskCanceledException)
+        {
         }
     }
 }

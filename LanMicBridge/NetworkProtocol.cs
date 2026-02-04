@@ -8,7 +8,8 @@ internal enum PacketType : byte
     Accept = 2,
     Audio = 3,
     KeepAlive = 4,
-    Stats = 5
+    Stats = 5,
+    Pcm = 6
 }
 
 internal static class NetworkProtocol
@@ -64,6 +65,17 @@ internal static class NetworkProtocol
         return buffer;
     }
 
+    public static byte[] BuildPcm(uint senderId, uint sequence, ReadOnlySpan<byte> payload)
+    {
+        var buffer = new byte[10 + payload.Length];
+        buffer[0] = (byte)PacketType.Pcm;
+        buffer[1] = Version;
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(2, 4), senderId);
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(6, 4), sequence);
+        payload.CopyTo(buffer.AsSpan(10));
+        return buffer;
+    }
+
     public static bool TryParse(ReadOnlySpan<byte> buffer, out PacketType type, out uint senderId, out uint sequence, out ReadOnlySpan<byte> payload)
     {
         type = 0;
@@ -101,6 +113,7 @@ internal static class NetworkProtocol
                 senderId = BinaryPrimitives.ReadUInt32LittleEndian(buffer.Slice(2, 4));
                 return true;
             case PacketType.Audio:
+            case PacketType.Pcm:
                 if (buffer.Length < 10)
                 {
                     return false;
