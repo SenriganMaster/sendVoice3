@@ -45,7 +45,6 @@ public partial class Form1 : Form
     private const int OutputForceStartMs = 1000;
 
     private readonly AudioMeter _meterA = new();
-    private readonly AudioMeter _meterB = new();
     private readonly Stopwatch _statsWatch = new();
     private readonly Stopwatch _receiverClock = new();
 
@@ -141,16 +140,12 @@ public partial class Form1 : Form
     private Label _lblPort = null!;
     private Label _lblCableStatus = null!;
     private Label _lblCableGuide = null!;
-    private ProgressBar _progressMeterA = null!;
-    private ProgressBar _progressMeterB = null!;
     private Label _lblMeterA = null!;
-    private Label _lblMeterB = null!;
     private Label _lblMeterWarning = null!;
     private Label _lblMeterGuide = null!;
     private Label _lblStats = null!;
     private Button _btnCheckTone = null!;
     private Label _lblCheckResult = null!;
-    private Label _lblAquaGuide = null!;
     private LinkLabel _linkReceiverDetail = null!;
     private GroupBox _groupReceiverDetail = null!;
     private ComboBox _comboOutputDevice = null!;
@@ -174,7 +169,6 @@ public partial class Form1 : Form
     private Label _lblGainValue = null!;
     private TrackBar _trackVadThreshold = null!;
     private Label _lblVadThresholdValue = null!;
-    private Label _lblSenderMeter = null!;
     private Label _lblSenderMeterDetail = null!;
     private CheckBox _chkSendProcessing = null!;
     private CheckBox _chkSendTestTone = null!;
@@ -182,6 +176,10 @@ public partial class Form1 : Form
 
     private StatusStrip _statusStrip = null!;
     private ToolStripStatusLabel _statusLabel = null!;
+    private ToolStripStatusLabel _alertLabel = null!;
+    private ToolStripButton _restartButton = null!;
+    private string _lastAlert = string.Empty;
+    private DateTime _lastAlertTime = DateTime.MinValue;
 
     public Form1()
     {
@@ -265,8 +263,17 @@ public partial class Form1 : Form
         _senderPanel.Visible = false;
 
         _statusStrip = new StatusStrip { Dock = DockStyle.Fill };
-        _statusLabel = new ToolStripStatusLabel { Text = "待受中" };
+        _statusLabel = new ToolStripStatusLabel { Text = "待受中", Spring = true };
+        _alertLabel = new ToolStripStatusLabel { Text = "", ForeColor = Color.DarkRed, Visible = false };
+        _restartButton = new ToolStripButton
+        {
+            Text = "再起動",
+            Visible = false
+        };
+        _restartButton.Click += (_, _) => RestartApplication();
         _statusStrip.Items.Add(_statusLabel);
+        _statusStrip.Items.Add(_alertLabel);
+        _statusStrip.Items.Add(_restartButton);
         mainLayout.Controls.Add(_statusStrip, 0, 2);
 
         _statsTimer = new System.Windows.Forms.Timer { Interval = 1000 };
@@ -286,7 +293,7 @@ public partial class Form1 : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 13,
+            RowCount = 6,
             Padding = new Padding(16)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
@@ -295,15 +302,8 @@ public partial class Form1 : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(layout);
 
         layout.Controls.Add(new Label { Text = "このPCのIP (IPv4)", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
@@ -346,83 +346,35 @@ public partial class Form1 : Form
         layout.SetColumnSpan(_lblCableGuide, 2);
         layout.Controls.Add(_lblCableGuide, 0, 3);
 
-        var meterGroup = new GroupBox { Text = "入力レベルメーター", Dock = DockStyle.Fill };
-        var meterLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4 };
-        meterLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
-        meterLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        meterLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        meterLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        meterLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        meterLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        meterGroup.Controls.Add(meterLayout);
-
-        meterLayout.Controls.Add(new Label { Text = "Meter-A (出力前)", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-        _progressMeterA = new ProgressBar { Dock = DockStyle.Fill, Maximum = 100 };
-        meterLayout.Controls.Add(_progressMeterA, 1, 0);
-        _lblMeterA = new Label { Text = "Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
-        meterLayout.Controls.Add(_lblMeterA, 1, 1);
-        meterLayout.Controls.Add(new Label { Text = "Meter-B (ループバック)", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
-        _progressMeterB = new ProgressBar { Dock = DockStyle.Fill, Maximum = 100 };
-        meterLayout.Controls.Add(_progressMeterB, 1, 2);
-        _lblMeterB = new Label { Text = "Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
-        meterLayout.Controls.Add(_lblMeterB, 1, 3);
-
-        _lblMeterWarning = new Label { Text = "", AutoSize = true, Anchor = AnchorStyles.Left };
-        layout.Controls.Add(_lblMeterWarning, 0, 4);
-        layout.SetColumnSpan(_lblMeterWarning, 2);
-
-        layout.Controls.Add(meterGroup, 0, 5);
-        layout.SetColumnSpan(meterGroup, 2);
-
-        _lblMeterGuide = new Label
-        {
-            Text = "Meter-Aが0付近: 送信停止 / IP / Firewallを確認\nMeter-Aが動くのに拾えない: Aqua Voice入力をCABLE Outputに設定",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left
-        };
-        layout.Controls.Add(_lblMeterGuide, 0, 6);
-        layout.SetColumnSpan(_lblMeterGuide, 2);
-
-        _lblOutputLevel = new Label { Text = "出力後レベル: Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
-        layout.Controls.Add(_lblOutputLevel, 0, 7);
-        layout.SetColumnSpan(_lblOutputLevel, 2);
-
-        _lblStats = new Label { Text = "Packets: 0  Loss: 0%  Jitter: 0ms  Delay: 0ms", AutoSize = true, Anchor = AnchorStyles.Left };
-        layout.Controls.Add(_lblStats, 0, 8);
-        layout.SetColumnSpan(_lblStats, 2);
-
-        _btnCheckTone = new Button { Text = "チェック音を鳴らす", Width = 160, Height = 30, Anchor = AnchorStyles.Left };
-        _btnCheckTone.Click += BtnCheckTone_Click;
-        _lblCheckResult = new Label { Text = "結果: -", AutoSize = true, Anchor = AnchorStyles.Left };
-        layout.Controls.Add(_btnCheckTone, 0, 9);
-        layout.Controls.Add(_lblCheckResult, 1, 9);
-
-        _lblAquaGuide = new Label
-        {
-            Text = "Aqua Voice > Settings > mic input の Test を押すとループバック確認できます",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left
-        };
-        layout.Controls.Add(_lblAquaGuide, 0, 10);
-        layout.SetColumnSpan(_lblAquaGuide, 2);
-
         _linkReceiverDetail = new LinkLabel { Text = "詳細設定を表示", AutoSize = true, Anchor = AnchorStyles.Left };
         _linkReceiverDetail.Click += (_, _) => ToggleReceiverDetail();
-        layout.Controls.Add(_linkReceiverDetail, 0, 11);
+        layout.Controls.Add(_linkReceiverDetail, 0, 4);
         layout.SetColumnSpan(_linkReceiverDetail, 2);
 
-        _groupReceiverDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Top, Visible = false, Height = 200 };
-        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7, Padding = new Padding(8) };
+        _groupReceiverDetail = new GroupBox
+        {
+            Text = "詳細設定",
+            Dock = DockStyle.Top,
+            Visible = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink
+        };
+        var detailLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 7,
+            Padding = new Padding(8)
+        };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var i = 0; i < detailLayout.RowCount; i++)
+        {
+            detailLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
         _groupReceiverDetail.Controls.Add(detailLayout);
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         detailLayout.Controls.Add(new Label { Text = "出力デバイス", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         _comboOutputDevice = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _comboOutputDevice.SelectedIndexChanged += (_, _) => ApplyOutputDeviceSelection();
@@ -433,7 +385,13 @@ public partial class Form1 : Form
         _comboJitter.SelectedIndex = 0;
         _comboJitter.SelectedIndexChanged += (_, _) => RestartOutputForJitter();
         detailLayout.Controls.Add(_comboJitter, 1, 1);
-        detailLayout.Controls.Add(new Label { Text = "出力ゲイン", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
+        detailLayout.Controls.Add(new Label
+        {
+            Text = "出力ゲイン",
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 2);
         var gainPanel = new Panel { Dock = DockStyle.Fill };
         _trackOutputGain = new TrackBar { Minimum = 25, Maximum = 1000, Value = 100, TickFrequency = 25, Dock = DockStyle.Fill };
         _trackOutputGain.Scroll += (_, _) => UpdateOutputGain();
@@ -446,7 +404,13 @@ public partial class Form1 : Form
         _chkRecvProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
         _chkRecvProcessing.CheckedChanged += (_, _) => _enableRecvProcessing = _chkRecvProcessing.Checked;
         detailLayout.Controls.Add(_chkRecvProcessing, 1, 3);
-        detailLayout.Controls.Add(new Label { Text = "強制再生待ち", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
+        detailLayout.Controls.Add(new Label
+        {
+            Text = "強制再生待ち",
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 4);
         var forcePanel = new Panel { Dock = DockStyle.Fill };
         _trackOutputForceStart = new TrackBar { Minimum = 5, Maximum = 10, Value = 10, TickFrequency = 1, Dock = DockStyle.Fill };
         _trackOutputForceStart.Scroll += (_, _) => UpdateOutputForceStart();
@@ -456,7 +420,53 @@ public partial class Form1 : Form
         detailLayout.Controls.Add(forcePanel, 1, 4);
         UpdateOutputForceStart();
 
-        layout.Controls.Add(_groupReceiverDetail, 0, 12);
+        _btnCheckTone = new Button { Text = "チェック音を鳴らす", Width = 160, Height = 30, Anchor = AnchorStyles.Left };
+        _btnCheckTone.Click += BtnCheckTone_Click;
+        _lblCheckResult = new Label { Text = "結果: -", AutoSize = true, Anchor = AnchorStyles.Left };
+        detailLayout.Controls.Add(_btnCheckTone, 0, 5);
+        detailLayout.Controls.Add(_lblCheckResult, 1, 5);
+
+        var infoGroup = new GroupBox
+        {
+            Text = "情報",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink
+        };
+        var infoLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1
+        };
+        infoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        infoGroup.Controls.Add(infoLayout);
+
+        _lblMeterGuide = new Label
+        {
+            Text = "音量が0付近: 送信停止 / IP / Firewallを確認\n音量が動くのに拾えない: 入力アプリのマイク入力を CABLE Output に設定",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left
+        };
+        infoLayout.Controls.Add(_lblMeterGuide, 0, 0);
+
+        _lblMeterWarning = new Label { Text = "", AutoSize = true, Anchor = AnchorStyles.Left };
+        infoLayout.Controls.Add(_lblMeterWarning, 0, 1);
+
+        _lblMeterA = new Label { Text = "音量: Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
+        infoLayout.Controls.Add(_lblMeterA, 0, 2);
+
+        _lblOutputLevel = new Label { Text = "出力後レベル: Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
+        infoLayout.Controls.Add(_lblOutputLevel, 0, 3);
+
+        _lblStats = new Label { Text = "Packets: 0  Loss: 0%  Jitter: 0ms  Delay: 0ms", AutoSize = true, Anchor = AnchorStyles.Left };
+        infoLayout.Controls.Add(_lblStats, 0, 4);
+
+        detailLayout.Controls.Add(infoGroup, 0, 6);
+        detailLayout.SetColumnSpan(infoGroup, 2);
+
+        layout.Controls.Add(_groupReceiverDetail, 0, 5);
         layout.SetColumnSpan(_groupReceiverDetail, 2);
 
         return panel;
@@ -469,17 +479,15 @@ public partial class Form1 : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 7,
+            RowCount = 5,
             Padding = new Padding(16)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 300));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(layout);
 
@@ -493,13 +501,9 @@ public partial class Form1 : Form
         layout.Controls.Add(_btnSenderToggle, 0, 1);
         layout.Controls.Add(_lblSenderStatus, 1, 1);
 
-        _lblSenderMeter = new Label { Text = "送信入力レベル: Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
-        layout.Controls.Add(_lblSenderMeter, 0, 2);
-        layout.SetColumnSpan(_lblSenderMeter, 2);
-
         _linkSenderDetail = new LinkLabel { Text = "詳細設定を表示", AutoSize = true, Anchor = AnchorStyles.Left };
         _linkSenderDetail.Click += (_, _) => ToggleSenderDetail();
-        layout.Controls.Add(_linkSenderDetail, 0, 3);
+        layout.Controls.Add(_linkSenderDetail, 0, 2);
         layout.SetColumnSpan(_linkSenderDetail, 2);
 
         _groupSenderDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Fill, Visible = false, Height = 340 };
@@ -578,7 +582,7 @@ public partial class Form1 : Form
         _lblSenderMeterDetail = new Label { Text = "Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
         detailLayout.Controls.Add(_lblSenderMeterDetail, 1, 8);
 
-        layout.Controls.Add(_groupSenderDetail, 0, 4);
+        layout.Controls.Add(_groupSenderDetail, 0, 3);
         layout.SetColumnSpan(_groupSenderDetail, 2);
 
         return panel;
@@ -1110,6 +1114,7 @@ public partial class Form1 : Form
             AppLogger.LogException("受信開始失敗", ex);
             SetStatus("エラー: 受信開始失敗");
             MessageBox.Show($"受信開始に失敗しました: {ex.Message}", "LanMicBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowAlert("受信開始に失敗しました。再起動を試してください。");
         }
     }
 
@@ -1165,6 +1170,7 @@ public partial class Form1 : Form
         {
             AppLogger.LogException("出力初期化失敗", ex);
             SetStatus("エラー: 出力初期化失敗");
+            ShowAlert("出力初期化に失敗しました。再起動を試してください。");
         }
     }
 
@@ -1221,6 +1227,7 @@ public partial class Form1 : Form
             {
                 AppLogger.LogException("受信エラー", ex);
                 BeginInvoke(() => SetStatus("エラー: 受信エラー"));
+                ShowAlert("受信中にエラーが発生しました。再起動を試してください。");
             }
         }
     }
@@ -1555,7 +1562,7 @@ public partial class Form1 : Form
 
         AudioMeter.ComputePeakRms(pcm, out var peak, out var rms);
         _meterA.Update(peak, rms);
-        UpdateMeterUi(_meterA, _progressMeterA, _lblMeterA);
+        UpdateMeterText(_meterA, _lblMeterA);
         UpdateMeterWarnings(peak, _meterA.SmoothedRmsDb);
 
         var rmsDbPre = LinearToDb(rms);
@@ -1718,13 +1725,21 @@ public partial class Form1 : Form
             return;
         }
 
-        _suppressNetworkAudioUntil = DateTime.UtcNow.AddSeconds(1.1);
-        var tone = GenerateSinePcm16(1000, 1.0f, -12f);
-        _playBuffer.AddSamples(tone, 0, tone.Length);
+        _btnCheckTone.Enabled = false;
+        try
+        {
+            _suppressNetworkAudioUntil = DateTime.UtcNow.AddSeconds(1.1);
+            var tone = GenerateSinePcm16(1000, 1.0f, -12f);
+            _playBuffer.AddSamples(tone, 0, tone.Length);
 
-        var pass = await RunLoopbackCheckAsync();
-        _lblCheckResult.Text = pass ? "結果: PASS" : "結果: FAIL";
-        AppLogger.Log($"チェック音結果 {(pass ? "PASS" : "FAIL")}");
+            var pass = await RunLoopbackCheckAsync();
+            _lblCheckResult.Text = pass ? "結果: PASS" : "結果: FAIL";
+            AppLogger.Log($"チェック音結果 {(pass ? "PASS" : "FAIL")}");
+        }
+        finally
+        {
+            _btnCheckTone.Enabled = true;
+        }
     }
 
     private async Task<bool> RunLoopbackCheckAsync()
@@ -1732,7 +1747,6 @@ public partial class Form1 : Form
         var outputIndex = FindCableOutputIndex();
         if (outputIndex < 0 || outputIndex >= _captureDevices.Count)
         {
-            _lblMeterB.Text = "N/A";
             return false;
         }
 
@@ -1747,9 +1761,7 @@ public partial class Form1 : Form
             ReadOnlySpan<byte> buffer = args.Buffer.AsSpan(0, args.BytesRecorded);
             ConvertToPcm16(buffer, capture.WaveFormat, out var pcm);
             AudioMeter.ComputePeakRms(pcm, out var peak, out var rms);
-            _meterB.Update(peak, rms);
-            UpdateMeterUi(_meterB, _progressMeterB, _lblMeterB);
-            var rmsDb = _meterB.SmoothedRmsDb;
+            var rmsDb = LinearToDb(rms);
             if (rmsDb > maxRmsDb)
             {
                 maxRmsDb = rmsDb;
@@ -1827,23 +1839,18 @@ public partial class Form1 : Form
         return bytes;
     }
 
-    private void UpdateMeterUi(AudioMeter meter, ProgressBar progress, Label label)
+    private void UpdateMeterText(AudioMeter meter, Label label)
     {
         var peakDb = meter.SmoothedPeakDb;
         var rmsDb = meter.SmoothedRmsDb;
-        var progressValue = DbToProgress(rmsDb);
-        if (progress.InvokeRequired)
+        var text = $"音量: Peak {peakDb:0.0} dBFS / RMS {rmsDb:0.0} dBFS";
+        if (label.InvokeRequired)
         {
-            progress.BeginInvoke(() =>
-            {
-                progress.Value = progressValue;
-                label.Text = $"Peak {peakDb:0.0} dBFS / RMS {rmsDb:0.0} dBFS";
-            });
+            label.BeginInvoke(() => label.Text = text);
         }
         else
         {
-            progress.Value = progressValue;
-            label.Text = $"Peak {peakDb:0.0} dBFS / RMS {rmsDb:0.0} dBFS";
+            label.Text = text;
         }
     }
 
@@ -1864,16 +1871,6 @@ public partial class Form1 : Form
 
     private void UpdateSenderMeterText(string text)
     {
-        var mainText = $"送信入力レベル: {text}";
-        if (_lblSenderMeter.InvokeRequired)
-        {
-            _lblSenderMeter.BeginInvoke(() => _lblSenderMeter.Text = mainText);
-        }
-        else
-        {
-            _lblSenderMeter.Text = mainText;
-        }
-
         if (_lblSenderMeterDetail.InvokeRequired)
         {
             _lblSenderMeterDetail.BeginInvoke(() => _lblSenderMeterDetail.Text = text);
@@ -1899,7 +1896,7 @@ public partial class Form1 : Form
     private void UpdateMeterWarnings(float peak, float rmsDb)
     {
         var warnings = new List<string>();
-        if (rmsDb < VadThresholdDb)
+        if (rmsDb < _vadThresholdDb)
         {
             _lowRmsSince ??= DateTime.UtcNow;
             if ((DateTime.UtcNow - _lowRmsSince.Value).TotalSeconds >= 2)
@@ -1925,12 +1922,6 @@ public partial class Form1 : Form
         {
             _lblMeterWarning.Text = text;
         }
-    }
-
-    private static int DbToProgress(float db)
-    {
-        var clamped = Math.Clamp(db, -60f, 0f);
-        return (int)Math.Round((clamped + 60f) / 60f * 100f);
     }
 
     private void BtnSenderToggle_Click(object? sender, EventArgs e)
@@ -2245,6 +2236,7 @@ public partial class Form1 : Form
             AppLogger.LogException("送信開始失敗", ex);
             StopSender();
             MessageBox.Show($"送信開始に失敗しました: {ex.Message}", "LanMicBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowAlert("送信開始に失敗しました。再起動を試してください。");
         }
     }
 
@@ -2287,6 +2279,7 @@ public partial class Form1 : Form
         {
             AppLogger.LogException("録音停止", e.Exception);
             BeginInvoke(() => MessageBox.Show($"録音停止: {e.Exception.Message}", "LanMicBridge", MessageBoxButtons.OK, MessageBoxIcon.Error));
+            ShowAlert("録音が停止しました。再起動を試してください。");
             StopSender();
         }
     }
@@ -2433,6 +2426,7 @@ public partial class Form1 : Form
             {
                 AppLogger.LogException("送信ループ", ex);
                 SetSenderStatus("エラー");
+                ShowAlert("送信中にエラーが発生しました。再起動を試してください。");
                 await Task.Delay(200, token);
             }
 
@@ -2479,6 +2473,7 @@ public partial class Form1 : Form
             catch (Exception ex)
             {
                 AppLogger.LogException("送信受信", ex);
+                ShowAlert("送信中にエラーが発生しました。再起動を試してください。");
                 await Task.Delay(200, token);
             }
         }
@@ -2554,6 +2549,56 @@ public partial class Form1 : Form
         {
             _statusLabel.Text = text;
         }
+    }
+
+    private void ShowAlert(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (message == _lastAlert && (now - _lastAlertTime).TotalSeconds < 2)
+        {
+            return;
+        }
+
+        _lastAlert = message;
+        _lastAlertTime = now;
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => SetAlertText(message));
+        }
+        else
+        {
+            SetAlertText(message);
+        }
+    }
+
+    private void SetAlertText(string message)
+    {
+        _alertLabel.Text = message;
+        _alertLabel.Visible = true;
+        _restartButton.Visible = true;
+    }
+
+    private void RestartApplication()
+    {
+        try
+        {
+            SaveAppSettings();
+            StopSender();
+            StopReceiver();
+        }
+        catch
+        {
+        }
+
+        AppLogger.Log("再起動要求");
+        Application.Restart();
+        Environment.Exit(0);
     }
 
     private static void WaitTaskSafely(Task? task, int millisecondsTimeout)
