@@ -40,6 +40,9 @@ public partial class Form1 : Form
     private const float SendNoiseGateRangeDb = 8f;
     private const int TestToneHz = 1000;
     private const float TestToneLevelDb = -12f;
+    private const float OutputGainBasePercent = 42f;
+    private const float SendGainBasePercent = 40f;
+    private const int OutputForceStartMs = 1000;
 
     private readonly AudioMeter _meterA = new();
     private readonly AudioMeter _meterB = new();
@@ -65,7 +68,12 @@ public partial class Form1 : Form
     private bool _playoutInitialized;
     private bool _playoutBuffering = true;
     private DateTime _playoutBufferingSince = DateTime.MinValue;
-    private int _targetJitterFrames;
+    private int _baseJitterFrames;
+    private int _adaptiveJitterFrames;
+    private int _minJitterFrames;
+    private int _maxJitterFrames;
+    private int _jitterWindowFrames;
+    private int _jitterMissesWindow;
     private PacketType _lastPacketType = PacketType.Audio;
     private long _packetsReceived;
     private long _packetsLost;
@@ -114,6 +122,9 @@ public partial class Form1 : Form
     private int _prebufferMs;
     private int _rebufferThresholdMs;
     private bool _sendPcmDirect;
+    private AppSettings _appSettings = new();
+    private bool _loadingSettings;
+    private DateTime _outputStartPendingSince = DateTime.MinValue;
 
     private System.Windows.Forms.Timer _statsTimer = null!;
     private System.Windows.Forms.Timer _receiverStatusTimer = null!;
@@ -179,12 +190,13 @@ public partial class Form1 : Form
         RefreshDeviceLists();
         UpdateIpList();
         UpdateCableStatus();
-        StartReceiver();
-        UpdateModeUi(true);
+        LoadAppSettings();
+        UpdateModeUi(_radioReceiver.Checked);
     }
 
     private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        SaveAppSettings();
         StopSender();
         StopReceiver();
         _deviceEnumerator?.Dispose();
@@ -503,10 +515,11 @@ public partial class Form1 : Form
         detailLayout.Controls.Add(new Label { Text = "送信品質", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
         _comboQuality = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _comboQuality.Items.AddRange(new object[] { "低", "標準", "高", "超高" });
-        _comboQuality.SelectedIndex = 2;
+        _comboQuality.SelectedIndex = 3;
         _comboQuality.SelectedIndexChanged += (_, _) => ApplyQualitySelection();
         _comboQuality.Enabled = true;
         detailLayout.Controls.Add(_comboQuality, 1, 2);
+        ApplyQualitySelection();
         detailLayout.Controls.Add(new Label { Text = "送信方式", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
         _comboSendMode = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _comboSendMode.Items.AddRange(new object[] { "Opus (推奨)", "PCM直送(テスト)" });
@@ -547,6 +560,11 @@ public partial class Form1 : Form
 
     private void ModeChanged(object? sender, EventArgs e)
     {
+        if (_loadingSettings)
+        {
+            return;
+        }
+
         if (_radioReceiver.Checked)
         {
             UpdateModeUi(true);
@@ -707,6 +725,256 @@ public partial class Form1 : Form
         }
     }
 
+    private void LoadAppSettings()
+    {
+        _appSettings = AppSettings.Load();
+        ApplySettingsToUi(_appSettings);
+    }
+
+    private void SaveAppSettings()
+    {
+        var settings = CollectAppSettings();
+        settings.Save();
+        _appSettings = settings;
+    }
+
+    private void ApplySettingsToUi(AppSettings settings)
+    {
+        _loadingSettings = true;
+        try
+        {
+            if (settings.ReceiverDetailVisible.HasValue)
+            {
+                SetReceiverDetailVisible(settings.ReceiverDetailVisible.Value);
+            }
+
+            if (settings.SenderDetailVisible.HasValue)
+            {
+                SetSenderDetailVisible(settings.SenderDetailVisible.Value);
+            }
+
+            var outputIndex = FindRenderDeviceIndex(settings);
+            if (outputIndex >= 0 && outputIndex < _comboOutputDevice.Items.Count)
+            {
+                _comboOutputDevice.SelectedIndex = outputIndex;
+            }
+
+            if (settings.JitterIndex is int jitterIndex &&
+                jitterIndex >= 0 &&
+                jitterIndex < _comboJitter.Items.Count)
+            {
+                _comboJitter.SelectedIndex = jitterIndex;
+            }
+
+            if (settings.OutputGainPercent is int outputGainPercent)
+            {
+                _trackOutputGain.Value = Math.Clamp(outputGainPercent, _trackOutputGain.Minimum, _trackOutputGain.Maximum);
+                UpdateOutputGain();
+            }
+
+            if (settings.RecvProcessingEnabled.HasValue)
+            {
+                _chkRecvProcessing.Checked = settings.RecvProcessingEnabled.Value;
+            }
+
+            if (!string.IsNullOrWhiteSpace(settings.SenderIp))
+            {
+                _txtIp.Text = settings.SenderIp;
+            }
+
+            if (settings.CaptureApiIndex is int apiIndex &&
+                apiIndex >= 0 &&
+                apiIndex < _comboCaptureApi.Items.Count)
+            {
+                _comboCaptureApi.SelectedIndex = apiIndex;
+            }
+
+            var micIndex = FindCaptureDeviceIndex(settings);
+            if (micIndex >= 0 && micIndex < _comboMicDevice.Items.Count)
+            {
+                _comboMicDevice.SelectedIndex = micIndex;
+            }
+
+            if (settings.QualityIndex is int qualityIndex &&
+                qualityIndex >= 0 &&
+                qualityIndex < _comboQuality.Items.Count)
+            {
+                _comboQuality.SelectedIndex = qualityIndex;
+            }
+            ApplyQualitySelection();
+
+            if (settings.SendModeIndex is int sendModeIndex &&
+                sendModeIndex >= 0 &&
+                sendModeIndex < _comboSendMode.Items.Count)
+            {
+                _comboSendMode.SelectedIndex = sendModeIndex;
+            }
+
+            if (settings.SendGainPercent is int sendGainPercent)
+            {
+                _trackGain.Value = Math.Clamp(sendGainPercent, _trackGain.Minimum, _trackGain.Maximum);
+                UpdateGain();
+            }
+
+            if (settings.SendProcessingEnabled.HasValue)
+            {
+                _chkSendProcessing.Checked = settings.SendProcessingEnabled.Value;
+            }
+
+            if (settings.SendTestToneEnabled.HasValue)
+            {
+                _chkSendTestTone.Checked = settings.SendTestToneEnabled.Value;
+            }
+
+            var receiverMode = !string.Equals(settings.LastMode, "Sender", StringComparison.OrdinalIgnoreCase);
+            _radioReceiver.Checked = receiverMode;
+            _radioSender.Checked = !receiverMode;
+        }
+        finally
+        {
+            _loadingSettings = false;
+        }
+    }
+
+    private AppSettings CollectAppSettings()
+    {
+        var settings = new AppSettings
+        {
+            LastMode = _radioSender.Checked ? "Sender" : "Receiver",
+            JitterIndex = _comboJitter.SelectedIndex,
+            OutputGainPercent = _trackOutputGain.Value,
+            RecvProcessingEnabled = _chkRecvProcessing.Checked,
+            ReceiverDetailVisible = _groupReceiverDetail.Visible,
+            SenderIp = _txtIp.Text.Trim(),
+            CaptureApiIndex = _comboCaptureApi.SelectedIndex,
+            QualityIndex = _comboQuality.SelectedIndex,
+            SendModeIndex = _comboSendMode.SelectedIndex,
+            SendGainPercent = _trackGain.Value,
+            SendProcessingEnabled = _chkSendProcessing.Checked,
+            SendTestToneEnabled = _chkSendTestTone.Checked,
+            SenderDetailVisible = _groupSenderDetail.Visible
+        };
+
+        if (_comboOutputDevice.SelectedIndex >= 0 &&
+            _comboOutputDevice.SelectedIndex < _renderDevices.Count)
+        {
+            var device = _renderDevices[_comboOutputDevice.SelectedIndex];
+            settings.OutputDeviceId = device.ID;
+            settings.OutputDeviceName = device.FriendlyName;
+            settings.OutputDeviceIndex = _comboOutputDevice.SelectedIndex;
+        }
+
+        if (_comboCaptureApi.SelectedIndex == 1)
+        {
+            settings.CaptureMmeIndex = _comboMicDevice.SelectedIndex;
+            if (_comboMicDevice.SelectedIndex >= 0 && _comboMicDevice.SelectedIndex < _mmeDevices.Count)
+            {
+                settings.CaptureDeviceName = _mmeDevices[_comboMicDevice.SelectedIndex].ProductName;
+            }
+        }
+        else
+        {
+            settings.CaptureDeviceIndex = _comboMicDevice.SelectedIndex;
+            if (_comboMicDevice.SelectedIndex >= 0 && _comboMicDevice.SelectedIndex < _captureDevices.Count)
+            {
+                var device = _captureDevices[_comboMicDevice.SelectedIndex];
+                settings.CaptureDeviceId = device.ID;
+                settings.CaptureDeviceName = device.FriendlyName;
+            }
+        }
+
+        return settings;
+    }
+
+    private int FindRenderDeviceIndex(AppSettings settings)
+    {
+        if (!string.IsNullOrWhiteSpace(settings.OutputDeviceId))
+        {
+            for (var i = 0; i < _renderDevices.Count; i++)
+            {
+                if (string.Equals(_renderDevices[i].ID, settings.OutputDeviceId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.OutputDeviceName))
+        {
+            for (var i = 0; i < _renderDevices.Count; i++)
+            {
+                if (string.Equals(_renderDevices[i].FriendlyName, settings.OutputDeviceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+        }
+
+        if (settings.OutputDeviceIndex is int index && index >= 0 && index < _renderDevices.Count)
+        {
+            return index;
+        }
+
+        return -1;
+    }
+
+    private int FindCaptureDeviceIndex(AppSettings settings)
+    {
+        if (_comboCaptureApi.SelectedIndex == 1)
+        {
+            if (settings.CaptureMmeIndex is int mmeIndex &&
+                mmeIndex >= 0 &&
+                mmeIndex < _mmeDevices.Count)
+            {
+                return mmeIndex;
+            }
+
+            if (!string.IsNullOrWhiteSpace(settings.CaptureDeviceName))
+            {
+                for (var i = 0; i < _mmeDevices.Count; i++)
+                {
+                    if (string.Equals(_mmeDevices[i].ProductName, settings.CaptureDeviceName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return i;
+                    }
+                }
+            }
+
+            return -1;
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.CaptureDeviceId))
+        {
+            for (var i = 0; i < _captureDevices.Count; i++)
+            {
+                if (string.Equals(_captureDevices[i].ID, settings.CaptureDeviceId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.CaptureDeviceName))
+        {
+            for (var i = 0; i < _captureDevices.Count; i++)
+            {
+                if (string.Equals(_captureDevices[i].FriendlyName, settings.CaptureDeviceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+        }
+
+        if (settings.CaptureDeviceIndex is int captureIndex &&
+            captureIndex >= 0 &&
+            captureIndex < _captureDevices.Count)
+        {
+            return captureIndex;
+        }
+
+        return -1;
+    }
+
     private int FindCableInputIndex()
     {
         for (var i = 0; i < _renderDevices.Count; i++)
@@ -840,13 +1108,16 @@ public partial class Form1 : Form
             _outputStarted = false;
             _prebufferMs = _comboJitter.SelectedIndex switch
             {
-                1 => 180,
-                2 => 280,
-                _ => 80
+                1 => 220,
+                2 => 320,
+                _ => 120
             };
-            _targetJitterFrames = Math.Max(3, _prebufferMs / FrameMs);
+            _baseJitterFrames = Math.Max(3, _prebufferMs / FrameMs);
+            _adaptiveJitterFrames = _baseJitterFrames;
+            _minJitterFrames = Math.Max(3, _baseJitterFrames - 2);
+            _maxJitterFrames = _baseJitterFrames + 8;
             _rebufferThresholdMs = Math.Max(40, _prebufferMs / 2);
-            AppLogger.Log($"出力初期化 Device={device.FriendlyName} Latency={latency}ms Prebuffer={_prebufferMs}ms");
+            AppLogger.Log($"出力初期化 Device={device.FriendlyName} Latency={latency}ms Prebuffer={_prebufferMs}ms JitterFrames={_baseJitterFrames}");
         }
         catch (Exception ex)
         {
@@ -1008,14 +1279,14 @@ public partial class Form1 : Form
             if (_playoutBuffering)
             {
                 var bufferedCount = GetBufferedCount();
-                var bufferedEnough = bufferedCount >= _targetJitterFrames;
+                var bufferedEnough = bufferedCount >= _adaptiveJitterFrames;
                 var bufferedTooLong = bufferedCount > 0 && _playoutBufferingSince != DateTime.MinValue &&
                     (DateTime.UtcNow - _playoutBufferingSince).TotalSeconds >= 0.5;
                 if (bufferedEnough || bufferedTooLong)
                 {
                     _playoutBuffering = false;
                     next = stopwatch.Elapsed;
-                    AppLogger.Log($"再生開始 JitterFrames={_targetJitterFrames} Buffered={bufferedCount}");
+                    AppLogger.Log($"再生開始 JitterFrames={_adaptiveJitterFrames} Buffered={bufferedCount}");
                 }
                 else
                 {
@@ -1026,7 +1297,7 @@ public partial class Form1 : Form
             else
             {
                 var bufferedCount = GetBufferedCount();
-                if (bufferedCount > _targetJitterFrames * 3 && TryGetMinSequence(out var minSeq))
+                if (bufferedCount > _adaptiveJitterFrames * 3 && TryGetMinSequence(out var minSeq))
                 {
                     _playoutSequence = minSeq;
                     AppLogger.Log($"再同期 PlayoutSeq={_playoutSequence} Buffered={bufferedCount}");
@@ -1047,7 +1318,8 @@ public partial class Form1 : Form
 
     private void PlaySequence(uint sequence)
     {
-        if (TryDequeuePacket(sequence, out var entry) && entry != null)
+        var gotPacket = TryDequeuePacket(sequence, out var entry) && entry != null;
+        if (gotPacket)
         {
             if (entry.Type == PacketType.Audio)
             {
@@ -1058,6 +1330,7 @@ public partial class Form1 : Form
                 ProcessPcmPayload(entry.Payload);
             }
 
+            AdjustJitterTarget(true);
             return;
         }
 
@@ -1077,6 +1350,8 @@ public partial class Form1 : Form
         {
             DecodeAndPlay(Array.Empty<byte>(), 0, true, false);
         }
+
+        AdjustJitterTarget(false);
     }
 
     private void ProcessPcmPayload(byte[] payload)
@@ -1159,6 +1434,42 @@ public partial class Form1 : Form
         _playoutSequence = 0;
         _lastPacketType = PacketType.Audio;
         _playoutBufferingSince = DateTime.MinValue;
+        _adaptiveJitterFrames = _baseJitterFrames;
+        _jitterWindowFrames = 0;
+        _jitterMissesWindow = 0;
+        _outputStartPendingSince = DateTime.MinValue;
+    }
+
+    private void AdjustJitterTarget(bool gotPacket)
+    {
+        _jitterWindowFrames++;
+        if (!gotPacket)
+        {
+            _jitterMissesWindow++;
+        }
+
+        if (_jitterWindowFrames < 50)
+        {
+            return;
+        }
+
+        var missRate = _jitterMissesWindow / (double)_jitterWindowFrames;
+        var bufferedCount = GetBufferedCount();
+
+        if (missRate > 0.02 && _adaptiveJitterFrames < _maxJitterFrames)
+        {
+            var step = missRate > 0.1 ? 2 : 1;
+            _adaptiveJitterFrames = Math.Min(_adaptiveJitterFrames + step, _maxJitterFrames);
+            AppLogger.Log($"Jitter target ↑ {_adaptiveJitterFrames} missRate={missRate:0.0%}");
+        }
+        else if (missRate == 0 && bufferedCount > _adaptiveJitterFrames + 6 && _adaptiveJitterFrames > _minJitterFrames)
+        {
+            _adaptiveJitterFrames = Math.Max(_adaptiveJitterFrames - 1, _minJitterFrames);
+            AppLogger.Log($"Jitter target ↓ {_adaptiveJitterFrames}");
+        }
+
+        _jitterWindowFrames = 0;
+        _jitterMissesWindow = 0;
     }
 
     private void DecodeAndPlay(byte[] payload, int length, bool lost, bool useFec)
@@ -1308,6 +1619,7 @@ public partial class Form1 : Form
         {
             _output.Pause();
             _outputStarted = false;
+            _outputStartPendingSince = DateTime.MinValue;
             AppLogger.Log("出力再バッファ開始");
             return;
         }
@@ -1326,11 +1638,34 @@ public partial class Form1 : Form
             return;
         }
 
-        if (_playBuffer.BufferedDuration.TotalMilliseconds >= _prebufferMs)
+        var bufferedMs = _playBuffer.BufferedDuration.TotalMilliseconds;
+        if (bufferedMs <= 0)
+        {
+            _outputStartPendingSince = DateTime.MinValue;
+            return;
+        }
+
+        if (bufferedMs >= _prebufferMs)
         {
             _output.Play();
             _outputStarted = true;
+            _outputStartPendingSince = DateTime.MinValue;
             AppLogger.Log($"出力開始 Prebuffer={_prebufferMs}ms");
+            return;
+        }
+
+        if (_outputStartPendingSince == DateTime.MinValue)
+        {
+            _outputStartPendingSince = DateTime.UtcNow;
+            return;
+        }
+
+        if ((DateTime.UtcNow - _outputStartPendingSince).TotalMilliseconds >= OutputForceStartMs)
+        {
+            _output.Play();
+            _outputStarted = true;
+            _outputStartPendingSince = DateTime.MinValue;
+            AppLogger.Log($"出力強制開始 Buffered={bufferedMs:0}ms");
         }
     }
     private async void BtnCheckTone_Click(object? sender, EventArgs e)
@@ -1599,7 +1934,7 @@ public partial class Form1 : Form
 
     private void UpdateGain()
     {
-        _sendGain = _trackGain.Value / 100f;
+        _sendGain = (_trackGain.Value / 100f) * (SendGainBasePercent / 100f);
         if (_lblGainValue.InvokeRequired)
         {
             _lblGainValue.BeginInvoke(() => _lblGainValue.Text = $"{_trackGain.Value}%");
@@ -1612,7 +1947,7 @@ public partial class Form1 : Form
 
     private void UpdateOutputGain()
     {
-        _outputGain = _trackOutputGain.Value / 100f;
+        _outputGain = (_trackOutputGain.Value / 100f) * (OutputGainBasePercent / 100f);
         if (_lblOutputGainValue.InvokeRequired)
         {
             _lblOutputGainValue.BeginInvoke(() => _lblOutputGainValue.Text = $"{_trackOutputGain.Value}%");
@@ -2112,14 +2447,24 @@ public partial class Form1 : Form
 
     private void ToggleReceiverDetail()
     {
-        _groupReceiverDetail.Visible = !_groupReceiverDetail.Visible;
-        _linkReceiverDetail.Text = _groupReceiverDetail.Visible ? "詳細設定を隠す" : "詳細設定を表示";
+        SetReceiverDetailVisible(!_groupReceiverDetail.Visible);
     }
 
     private void ToggleSenderDetail()
     {
-        _groupSenderDetail.Visible = !_groupSenderDetail.Visible;
-        _linkSenderDetail.Text = _groupSenderDetail.Visible ? "詳細設定を隠す" : "詳細設定を表示";
+        SetSenderDetailVisible(!_groupSenderDetail.Visible);
+    }
+
+    private void SetReceiverDetailVisible(bool visible)
+    {
+        _groupReceiverDetail.Visible = visible;
+        _linkReceiverDetail.Text = visible ? "詳細設定を隠す" : "詳細設定を表示";
+    }
+
+    private void SetSenderDetailVisible(bool visible)
+    {
+        _groupSenderDetail.Visible = visible;
+        _linkSenderDetail.Text = visible ? "詳細設定を隠す" : "詳細設定を表示";
     }
 
     private void SetStatus(string text)
