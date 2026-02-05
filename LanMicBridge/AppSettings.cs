@@ -27,6 +27,8 @@ internal sealed class AppSettings
     public bool? SendTestToneEnabled { get; set; }
     public bool? SenderDetailVisible { get; set; }
     public float? VadThresholdDb { get; set; }
+    public bool? SettingsVisible { get; set; }
+    public int? SettingsTabIndex { get; set; }
 
     public static AppSettings Load()
     {

@@ -156,6 +156,7 @@ public partial class Form1 : Form
     private Label _lblOutputForceStartValue = null!;
     private Label _lblOutputLevel = null!;
     private CheckBox _chkRecvProcessing = null!;
+    private GroupBox _receiverInfoGroup = null!;
 
     private TextBox _txtIp = null!;
     private Button _btnSenderToggle = null!;
@@ -180,6 +181,7 @@ public partial class Form1 : Form
     private ToolStripButton _restartButton = null!;
     private string _lastAlert = string.Empty;
     private DateTime _lastAlertTime = DateTime.MinValue;
+    private SettingsForm? _settingsForm;
 
     public Form1()
     {
@@ -203,6 +205,12 @@ public partial class Form1 : Form
         SaveAppSettings();
         StopSender();
         StopReceiver();
+        if (_settingsForm != null)
+        {
+            _settingsForm.Close();
+            _settingsForm.Dispose();
+            _settingsForm = null;
+        }
         _deviceEnumerator?.Dispose();
         _statsTimer?.Stop();
         _receiverStatusTimer?.Stop();
@@ -213,7 +221,8 @@ public partial class Form1 : Form
     private void BuildUi()
     {
         Text = "LanMicBridge";
-        MinimumSize = new Size(720, 560);
+        MinimumSize = new Size(720, 420);
+        Size = new Size(780, 460);
         StartPosition = FormStartPosition.CenterScreen;
 
         var mainLayout = new TableLayoutPanel
@@ -346,8 +355,8 @@ public partial class Form1 : Form
         layout.SetColumnSpan(_lblCableGuide, 2);
         layout.Controls.Add(_lblCableGuide, 0, 3);
 
-        _linkReceiverDetail = new LinkLabel { Text = "詳細設定を表示", AutoSize = true, Anchor = AnchorStyles.Left };
-        _linkReceiverDetail.Click += (_, _) => ToggleReceiverDetail();
+        _linkReceiverDetail = new LinkLabel { Text = "詳細設定を開く", AutoSize = true, Anchor = AnchorStyles.Left };
+        _linkReceiverDetail.Click += (_, _) => OpenSettingsTab(0);
         layout.Controls.Add(_linkReceiverDetail, 0, 4);
         layout.SetColumnSpan(_linkReceiverDetail, 2);
 
@@ -370,10 +379,13 @@ public partial class Form1 : Form
         };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < detailLayout.RowCount; i++)
-        {
-            detailLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        }
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 出力デバイス
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // ジッタバッファ
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 音声処理
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));  // 出力ゲイン
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));  // 強制再生待ち
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));  // チェック音
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 情報
         _groupReceiverDetail.Controls.Add(detailLayout);
         detailLayout.Controls.Add(new Label { Text = "出力デバイス", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         _comboOutputDevice = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -385,31 +397,33 @@ public partial class Form1 : Form
         _comboJitter.SelectedIndex = 0;
         _comboJitter.SelectedIndexChanged += (_, _) => RestartOutputForJitter();
         detailLayout.Controls.Add(_comboJitter, 1, 1);
+        detailLayout.Controls.Add(new Label { Text = "音声処理", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
+        _chkRecvProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
+        _chkRecvProcessing.CheckedChanged += (_, _) => _enableRecvProcessing = _chkRecvProcessing.Checked;
+        detailLayout.Controls.Add(_chkRecvProcessing, 1, 2);
         detailLayout.Controls.Add(new Label
         {
             Text = "出力ゲイン",
             AutoSize = false,
             Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft
-        }, 0, 2);
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(0, 4, 0, 0)
+        }, 0, 3);
         var gainPanel = new Panel { Dock = DockStyle.Fill };
         _trackOutputGain = new TrackBar { Minimum = 25, Maximum = 1000, Value = 100, TickFrequency = 25, Dock = DockStyle.Fill };
         _trackOutputGain.Scroll += (_, _) => UpdateOutputGain();
         _lblOutputGainValue = new Label { Text = "100%", AutoSize = true, Dock = DockStyle.Right };
         gainPanel.Controls.Add(_trackOutputGain);
         gainPanel.Controls.Add(_lblOutputGainValue);
-        detailLayout.Controls.Add(gainPanel, 1, 2);
+        detailLayout.Controls.Add(gainPanel, 1, 3);
         UpdateOutputGain();
-        detailLayout.Controls.Add(new Label { Text = "音声処理", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
-        _chkRecvProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
-        _chkRecvProcessing.CheckedChanged += (_, _) => _enableRecvProcessing = _chkRecvProcessing.Checked;
-        detailLayout.Controls.Add(_chkRecvProcessing, 1, 3);
         detailLayout.Controls.Add(new Label
         {
             Text = "強制再生待ち",
             AutoSize = false,
             Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(0, 4, 0, 0)
         }, 0, 4);
         var forcePanel = new Panel { Dock = DockStyle.Fill };
         _trackOutputForceStart = new TrackBar { Minimum = 5, Maximum = 10, Value = 10, TickFrequency = 1, Dock = DockStyle.Fill };
@@ -426,7 +440,7 @@ public partial class Form1 : Form
         detailLayout.Controls.Add(_btnCheckTone, 0, 5);
         detailLayout.Controls.Add(_lblCheckResult, 1, 5);
 
-        var infoGroup = new GroupBox
+        _receiverInfoGroup = new GroupBox
         {
             Text = "情報",
             Dock = DockStyle.Top,
@@ -441,7 +455,7 @@ public partial class Form1 : Form
             ColumnCount = 1
         };
         infoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        infoGroup.Controls.Add(infoLayout);
+        _receiverInfoGroup.Controls.Add(infoLayout);
 
         _lblMeterGuide = new Label
         {
@@ -463,11 +477,7 @@ public partial class Form1 : Form
         _lblStats = new Label { Text = "Packets: 0  Loss: 0%  Jitter: 0ms  Delay: 0ms", AutoSize = true, Anchor = AnchorStyles.Left };
         infoLayout.Controls.Add(_lblStats, 0, 4);
 
-        detailLayout.Controls.Add(infoGroup, 0, 6);
-        detailLayout.SetColumnSpan(infoGroup, 2);
-
-        layout.Controls.Add(_groupReceiverDetail, 0, 5);
-        layout.SetColumnSpan(_groupReceiverDetail, 2);
+        // 詳細設定と情報は別ウィンドウに移動するため、ここでは追加しない
 
         return panel;
     }
@@ -479,7 +489,7 @@ public partial class Form1 : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 5,
+            RowCount = 4,
             Padding = new Padding(16)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
@@ -487,7 +497,6 @@ public partial class Form1 : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 300));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(layout);
 
@@ -501,13 +510,28 @@ public partial class Form1 : Form
         layout.Controls.Add(_btnSenderToggle, 0, 1);
         layout.Controls.Add(_lblSenderStatus, 1, 1);
 
-        _linkSenderDetail = new LinkLabel { Text = "詳細設定を表示", AutoSize = true, Anchor = AnchorStyles.Left };
-        _linkSenderDetail.Click += (_, _) => ToggleSenderDetail();
+        _linkSenderDetail = new LinkLabel { Text = "詳細設定を開く", AutoSize = true, Anchor = AnchorStyles.Left };
+        _linkSenderDetail.Click += (_, _) => OpenSettingsTab(1);
         layout.Controls.Add(_linkSenderDetail, 0, 2);
         layout.SetColumnSpan(_linkSenderDetail, 2);
 
-        _groupSenderDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Fill, Visible = false, Height = 340 };
-        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 9, Padding = new Padding(8) };
+        _groupSenderDetail = new GroupBox
+        {
+            Text = "詳細設定",
+            Dock = DockStyle.Top,
+            Visible = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink
+        };
+        var detailLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 9,
+            Padding = new Padding(8)
+        };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _groupSenderDetail.Controls.Add(detailLayout);
@@ -519,7 +543,7 @@ public partial class Form1 : Form
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.Controls.Add(new Label { Text = "入力方式", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         _comboCaptureApi = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _comboCaptureApi.Items.AddRange(new object[] { "WASAPI", "MME (互換)" });
@@ -582,8 +606,7 @@ public partial class Form1 : Form
         _lblSenderMeterDetail = new Label { Text = "Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
         detailLayout.Controls.Add(_lblSenderMeterDetail, 1, 8);
 
-        layout.Controls.Add(_groupSenderDetail, 0, 3);
-        layout.SetColumnSpan(_groupSenderDetail, 2);
+        // 詳細設定は別ウィンドウに移動するため、ここでは追加しない
 
         return panel;
     }
@@ -773,16 +796,6 @@ public partial class Form1 : Form
         _loadingSettings = true;
         try
         {
-            if (settings.ReceiverDetailVisible.HasValue)
-            {
-                SetReceiverDetailVisible(settings.ReceiverDetailVisible.Value);
-            }
-
-            if (settings.SenderDetailVisible.HasValue)
-            {
-                SetSenderDetailVisible(settings.SenderDetailVisible.Value);
-            }
-
             var outputIndex = FindRenderDeviceIndex(settings);
             if (outputIndex >= 0 && outputIndex < _comboOutputDevice.Items.Count)
             {
@@ -878,6 +891,29 @@ public partial class Form1 : Form
         {
             _loadingSettings = false;
         }
+
+        var settingsVisible = settings.SettingsVisible ?? false;
+        var tabIndex = settings.SettingsTabIndex ?? -1;
+        if (settingsVisible)
+        {
+            if (tabIndex < 0)
+            {
+                if (settings.ReceiverDetailVisible == true)
+                {
+                    tabIndex = 0;
+                }
+                else if (settings.SenderDetailVisible == true)
+                {
+                    tabIndex = 1;
+                }
+                else
+                {
+                    tabIndex = 0;
+                }
+            }
+
+            OpenSettingsTab(tabIndex);
+        }
     }
 
     private AppSettings CollectAppSettings()
@@ -889,7 +925,7 @@ public partial class Form1 : Form
             OutputGainPercent = _trackOutputGain.Value,
             OutputForceStartMs = _outputForceStartMs,
             RecvProcessingEnabled = _chkRecvProcessing.Checked,
-            ReceiverDetailVisible = _groupReceiverDetail.Visible,
+            ReceiverDetailVisible = _settingsForm != null && _settingsForm.Visible && _settingsForm.SelectedTabIndex == 0,
             SenderIp = _txtIp.Text.Trim(),
             CaptureApiIndex = _comboCaptureApi.SelectedIndex,
             QualityIndex = _comboQuality.SelectedIndex,
@@ -897,8 +933,10 @@ public partial class Form1 : Form
             SendGainPercent = _trackGain.Value,
             SendProcessingEnabled = _chkSendProcessing.Checked,
             SendTestToneEnabled = _chkSendTestTone.Checked,
-            SenderDetailVisible = _groupSenderDetail.Visible,
-            VadThresholdDb = _vadThresholdDb
+            SenderDetailVisible = _settingsForm != null && _settingsForm.Visible && _settingsForm.SelectedTabIndex == 1,
+            VadThresholdDb = _vadThresholdDb,
+            SettingsVisible = _settingsForm != null && _settingsForm.Visible,
+            SettingsTabIndex = _settingsForm != null ? _settingsForm.SelectedTabIndex : null
         };
 
         if (_comboOutputDevice.SelectedIndex >= 0 &&
@@ -2511,26 +2549,46 @@ public partial class Form1 : Form
         }
     }
 
-    private void ToggleReceiverDetail()
+    private void OpenSettingsTab(int tabIndex)
     {
-        SetReceiverDetailVisible(!_groupReceiverDetail.Visible);
+        EnsureSettingsForm();
+        if (_settingsForm == null)
+        {
+            return;
+        }
+
+        _settingsForm.SelectedTabIndex = tabIndex;
+        if (!_settingsForm.Visible)
+        {
+            _settingsForm.Show(this);
+        }
+        else
+        {
+            _settingsForm.BringToFront();
+        }
     }
 
-    private void ToggleSenderDetail()
+    private void EnsureSettingsForm()
     {
-        SetSenderDetailVisible(!_groupSenderDetail.Visible);
-    }
+        if (_settingsForm != null)
+        {
+            return;
+        }
 
-    private void SetReceiverDetailVisible(bool visible)
-    {
-        _groupReceiverDetail.Visible = visible;
-        _linkReceiverDetail.Text = visible ? "詳細設定を隠す" : "詳細設定を表示";
-    }
+        _groupReceiverDetail.Visible = true;
+        _groupSenderDetail.Visible = true;
+        _receiverInfoGroup.Visible = true;
 
-    private void SetSenderDetailVisible(bool visible)
-    {
-        _groupSenderDetail.Visible = visible;
-        _linkSenderDetail.Text = visible ? "詳細設定を隠す" : "詳細設定を表示";
+        _settingsForm = new SettingsForm(_groupReceiverDetail, _groupSenderDetail, _receiverInfoGroup);
+        _settingsForm.FormClosing += (_, e) =>
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                _settingsForm.Hide();
+                SaveAppSettings();
+            }
+        };
     }
 
     private void SetStatus(string text)
