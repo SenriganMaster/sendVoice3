@@ -125,6 +125,8 @@ public partial class Form1 : Form
     private AppSettings _appSettings = new();
     private bool _loadingSettings;
     private DateTime _outputStartPendingSince = DateTime.MinValue;
+    private int _outputForceStartMs = OutputForceStartMs;
+    private float _vadThresholdDb = VadThresholdDb;
 
     private System.Windows.Forms.Timer _statsTimer = null!;
     private System.Windows.Forms.Timer _receiverStatusTimer = null!;
@@ -155,6 +157,8 @@ public partial class Form1 : Form
     private ComboBox _comboJitter = null!;
     private TrackBar _trackOutputGain = null!;
     private Label _lblOutputGainValue = null!;
+    private TrackBar _trackOutputForceStart = null!;
+    private Label _lblOutputForceStartValue = null!;
     private Label _lblOutputLevel = null!;
     private CheckBox _chkRecvProcessing = null!;
 
@@ -168,6 +172,8 @@ public partial class Form1 : Form
     private ComboBox _comboQuality = null!;
     private TrackBar _trackGain = null!;
     private Label _lblGainValue = null!;
+    private TrackBar _trackVadThreshold = null!;
+    private Label _lblVadThresholdValue = null!;
     private Label _lblSenderMeter = null!;
     private Label _lblSenderMeterDetail = null!;
     private CheckBox _chkSendProcessing = null!;
@@ -405,8 +411,8 @@ public partial class Form1 : Form
         layout.Controls.Add(_linkReceiverDetail, 0, 11);
         layout.SetColumnSpan(_linkReceiverDetail, 2);
 
-        _groupReceiverDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Top, Visible = false, Height = 170 };
-        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6, Padding = new Padding(8) };
+        _groupReceiverDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Top, Visible = false, Height = 200 };
+        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7, Padding = new Padding(8) };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _groupReceiverDetail.Controls.Add(detailLayout);
@@ -414,6 +420,7 @@ public partial class Form1 : Form
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         detailLayout.Controls.Add(new Label { Text = "出力デバイス", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
@@ -439,6 +446,15 @@ public partial class Form1 : Form
         _chkRecvProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
         _chkRecvProcessing.CheckedChanged += (_, _) => _enableRecvProcessing = _chkRecvProcessing.Checked;
         detailLayout.Controls.Add(_chkRecvProcessing, 1, 3);
+        detailLayout.Controls.Add(new Label { Text = "強制再生待ち", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
+        var forcePanel = new Panel { Dock = DockStyle.Fill };
+        _trackOutputForceStart = new TrackBar { Minimum = 5, Maximum = 10, Value = 10, TickFrequency = 1, Dock = DockStyle.Fill };
+        _trackOutputForceStart.Scroll += (_, _) => UpdateOutputForceStart();
+        _lblOutputForceStartValue = new Label { Text = "1.0s", AutoSize = true, Dock = DockStyle.Right };
+        forcePanel.Controls.Add(_trackOutputForceStart);
+        forcePanel.Controls.Add(_lblOutputForceStartValue);
+        detailLayout.Controls.Add(forcePanel, 1, 4);
+        UpdateOutputForceStart();
 
         layout.Controls.Add(_groupReceiverDetail, 0, 12);
         layout.SetColumnSpan(_groupReceiverDetail, 2);
@@ -486,8 +502,8 @@ public partial class Form1 : Form
         layout.Controls.Add(_linkSenderDetail, 0, 3);
         layout.SetColumnSpan(_linkSenderDetail, 2);
 
-        _groupSenderDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Fill, Visible = false, Height = 300 };
-        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 8, Padding = new Padding(8) };
+        _groupSenderDetail = new GroupBox { Text = "詳細設定", Dock = DockStyle.Fill, Visible = false, Height = 340 };
+        var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 9, Padding = new Padding(8) };
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _groupSenderDetail.Controls.Add(detailLayout);
@@ -495,6 +511,7 @@ public partial class Form1 : Form
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
@@ -540,17 +557,26 @@ public partial class Form1 : Form
         gainPanel.Controls.Add(_lblGainValue);
         detailLayout.Controls.Add(gainPanel, 1, 4);
         UpdateGain();
-        detailLayout.Controls.Add(new Label { Text = "音声処理", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 5);
+        detailLayout.Controls.Add(new Label { Text = "送信開始閾値", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 5);
+        var vadPanel = new Panel { Dock = DockStyle.Fill };
+        _trackVadThreshold = new TrackBar { Minimum = 30, Maximum = 90, Value = 45, TickFrequency = 5, Dock = DockStyle.Fill };
+        _trackVadThreshold.Scroll += (_, _) => UpdateVadThreshold();
+        _lblVadThresholdValue = new Label { Text = "-45 dBFS", AutoSize = true, Dock = DockStyle.Right };
+        vadPanel.Controls.Add(_trackVadThreshold);
+        vadPanel.Controls.Add(_lblVadThresholdValue);
+        detailLayout.Controls.Add(vadPanel, 1, 5);
+        UpdateVadThreshold();
+        detailLayout.Controls.Add(new Label { Text = "音声処理", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
         _chkSendProcessing = new CheckBox { Text = "AGC/ゲート/クリップ有効", Dock = DockStyle.Fill, Checked = true };
         _chkSendProcessing.CheckedChanged += (_, _) => _enableSendProcessing = _chkSendProcessing.Checked;
-        detailLayout.Controls.Add(_chkSendProcessing, 1, 5);
-        detailLayout.Controls.Add(new Label { Text = "送信テスト音", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
+        detailLayout.Controls.Add(_chkSendProcessing, 1, 6);
+        detailLayout.Controls.Add(new Label { Text = "送信テスト音", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 7);
         _chkSendTestTone = new CheckBox { Text = "1kHzサイン送出", Dock = DockStyle.Fill, Checked = false };
         _chkSendTestTone.CheckedChanged += (_, _) => _sendTestTone = _chkSendTestTone.Checked;
-        detailLayout.Controls.Add(_chkSendTestTone, 1, 6);
-        detailLayout.Controls.Add(new Label { Text = "送信入力レベル", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 7);
+        detailLayout.Controls.Add(_chkSendTestTone, 1, 7);
+        detailLayout.Controls.Add(new Label { Text = "送信入力レベル", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 8);
         _lblSenderMeterDetail = new Label { Text = "Peak -∞ dBFS / RMS -∞ dBFS", AutoSize = true, Anchor = AnchorStyles.Left };
-        detailLayout.Controls.Add(_lblSenderMeterDetail, 1, 7);
+        detailLayout.Controls.Add(_lblSenderMeterDetail, 1, 8);
 
         layout.Controls.Add(_groupSenderDetail, 0, 4);
         layout.SetColumnSpan(_groupSenderDetail, 2);
@@ -772,6 +798,13 @@ public partial class Form1 : Form
                 UpdateOutputGain();
             }
 
+            if (settings.OutputForceStartMs is int outputForceStartMs)
+            {
+                var value = Math.Clamp(outputForceStartMs / 100, _trackOutputForceStart.Minimum, _trackOutputForceStart.Maximum);
+                _trackOutputForceStart.Value = value;
+                UpdateOutputForceStart();
+            }
+
             if (settings.RecvProcessingEnabled.HasValue)
             {
                 _chkRecvProcessing.Checked = settings.RecvProcessingEnabled.Value;
@@ -826,6 +859,13 @@ public partial class Form1 : Form
                 _chkSendTestTone.Checked = settings.SendTestToneEnabled.Value;
             }
 
+            if (settings.VadThresholdDb.HasValue)
+            {
+                var value = (int)Math.Round(-settings.VadThresholdDb.Value);
+                _trackVadThreshold.Value = Math.Clamp(value, _trackVadThreshold.Minimum, _trackVadThreshold.Maximum);
+                UpdateVadThreshold();
+            }
+
             var receiverMode = !string.Equals(settings.LastMode, "Sender", StringComparison.OrdinalIgnoreCase);
             _radioReceiver.Checked = receiverMode;
             _radioSender.Checked = !receiverMode;
@@ -843,6 +883,7 @@ public partial class Form1 : Form
             LastMode = _radioSender.Checked ? "Sender" : "Receiver",
             JitterIndex = _comboJitter.SelectedIndex,
             OutputGainPercent = _trackOutputGain.Value,
+            OutputForceStartMs = _outputForceStartMs,
             RecvProcessingEnabled = _chkRecvProcessing.Checked,
             ReceiverDetailVisible = _groupReceiverDetail.Visible,
             SenderIp = _txtIp.Text.Trim(),
@@ -852,7 +893,8 @@ public partial class Form1 : Form
             SendGainPercent = _trackGain.Value,
             SendProcessingEnabled = _chkSendProcessing.Checked,
             SendTestToneEnabled = _chkSendTestTone.Checked,
-            SenderDetailVisible = _groupSenderDetail.Visible
+            SenderDetailVisible = _groupSenderDetail.Visible,
+            VadThresholdDb = _vadThresholdDb
         };
 
         if (_comboOutputDevice.SelectedIndex >= 0 &&
@@ -1281,12 +1323,12 @@ public partial class Form1 : Form
                 var bufferedCount = GetBufferedCount();
                 var bufferedEnough = bufferedCount >= _adaptiveJitterFrames;
                 var bufferedTooLong = bufferedCount > 0 && _playoutBufferingSince != DateTime.MinValue &&
-                    (DateTime.UtcNow - _playoutBufferingSince).TotalSeconds >= 0.5;
+                    (DateTime.UtcNow - _playoutBufferingSince).TotalMilliseconds >= _outputForceStartMs;
                 if (bufferedEnough || bufferedTooLong)
                 {
                     _playoutBuffering = false;
                     next = stopwatch.Elapsed;
-                    AppLogger.Log($"再生開始 JitterFrames={_adaptiveJitterFrames} Buffered={bufferedCount}");
+                    AppLogger.Log($"再生開始 JitterFrames={_adaptiveJitterFrames} Buffered={bufferedCount} Wait={_outputForceStartMs}ms");
                 }
                 else
                 {
@@ -1660,7 +1702,7 @@ public partial class Form1 : Form
             return;
         }
 
-        if ((DateTime.UtcNow - _outputStartPendingSince).TotalMilliseconds >= OutputForceStartMs)
+        if ((DateTime.UtcNow - _outputStartPendingSince).TotalMilliseconds >= _outputForceStartMs)
         {
             _output.Play();
             _outputStarted = true;
@@ -1955,6 +1997,35 @@ public partial class Form1 : Form
         else
         {
             _lblOutputGainValue.Text = $"{_trackOutputGain.Value}%";
+        }
+    }
+
+    private void UpdateOutputForceStart()
+    {
+        _outputForceStartMs = _trackOutputForceStart.Value * 100;
+        var seconds = _outputForceStartMs / 1000.0;
+        var text = $"{seconds:0.0}s";
+        if (_lblOutputForceStartValue.InvokeRequired)
+        {
+            _lblOutputForceStartValue.BeginInvoke(() => _lblOutputForceStartValue.Text = text);
+        }
+        else
+        {
+            _lblOutputForceStartValue.Text = text;
+        }
+    }
+
+    private void UpdateVadThreshold()
+    {
+        _vadThresholdDb = -_trackVadThreshold.Value;
+        var text = $"{_vadThresholdDb:0} dBFS";
+        if (_lblVadThresholdValue.InvokeRequired)
+        {
+            _lblVadThresholdValue.BeginInvoke(() => _lblVadThresholdValue.Text = text);
+        }
+        else
+        {
+            _lblVadThresholdValue.Text = text;
         }
     }
 
@@ -2278,7 +2349,7 @@ public partial class Form1 : Form
                 var rmsDbPre = LinearToDb(rmsPre);
                 var now = DateTime.UtcNow;
 
-                if (rmsDbPre >= VadThresholdDb || _sendTestTone)
+                if (rmsDbPre >= _vadThresholdDb || _sendTestTone)
                 {
                     _lastVoiceTime = now;
                 }
@@ -2329,7 +2400,7 @@ public partial class Form1 : Form
                     sentAudio = true;
                     SetSenderStatus(_accepted ? "接続中" : "再接続中");
                 }
-                else if (rmsDbPre >= VadThresholdDb || withinHangover || _sendTestTone)
+                else if (rmsDbPre >= _vadThresholdDb || withinHangover || _sendTestTone)
                 {
                     var encoded = encoder!.Encode(pcm, 0, FrameSamples, payload, 0, payload.Length);
                     var packet = NetworkProtocol.BuildAudio(_senderId, _sendSequence++, payload.AsSpan(0, encoded));

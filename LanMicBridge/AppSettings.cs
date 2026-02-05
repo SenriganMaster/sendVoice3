@@ -11,6 +11,7 @@ internal sealed class AppSettings
     public int? OutputDeviceIndex { get; set; }
     public int? JitterIndex { get; set; }
     public int? OutputGainPercent { get; set; }
+    public int? OutputForceStartMs { get; set; }
     public bool? RecvProcessingEnabled { get; set; }
     public bool? ReceiverDetailVisible { get; set; }
     public string? SenderIp { get; set; }
@@ -25,6 +26,7 @@ internal sealed class AppSettings
     public bool? SendProcessingEnabled { get; set; }
     public bool? SendTestToneEnabled { get; set; }
     public bool? SenderDetailVisible { get; set; }
+    public float? VadThresholdDb { get; set; }
 
     public static AppSettings Load()
     {
